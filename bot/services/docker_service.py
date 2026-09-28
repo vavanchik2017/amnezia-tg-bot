@@ -323,6 +323,30 @@ class DockerService:
         logger.info(f"Public IP detection result: {ip}")
         return ip
 
+    async def get_mapped_port(self, internal_port: int) -> int:
+        """Finds host port mapped to internal container port if Docker port mapping is used."""
+        try:
+            container = await self.get_container()
+            ports = container.attrs.get("NetworkSettings", {}).get("Ports", {}) or {}
+            for port_proto, bindings in ports.items():
+                if not bindings:
+                    continue
+                c_port = int(port_proto.split("/")[0])
+                if c_port == internal_port:
+                    host_p = bindings[0].get("HostPort")
+                    if host_p and str(host_p).isdigit():
+                        logger.info(f"Detected host mapped port {host_p} for container port {port_proto}")
+                        return int(host_p)
+            for port_proto, bindings in ports.items():
+                if bindings and "udp" in port_proto:
+                    host_p = bindings[0].get("HostPort")
+                    if host_p and str(host_p).isdigit():
+                        logger.info(f"Detected fallback host UDP port {host_p}")
+                        return int(host_p)
+        except Exception as e:
+            logger.warning(f"Could not inspect container port mappings: {e}")
+        return internal_port
+
     async def get_server_info(self) -> Dict[str, Any]:
         """Collects all server parameters needed to issue client configs."""
         if self._cached_server_info and self._cached_server_info.get("public_key") and self._cached_server_info.get("host") != "127.0.0.1":
@@ -334,9 +358,13 @@ class DockerService:
             raise RuntimeError(f"Контейнер '{settings.vpn_container_name}': {detail}")
 
         iface_name = settings.wg_interface or iface_info["interface"]
-        port = settings.server_port or iface_info["listen_port"]
+        internal_port = iface_info.get("listen_port", 51820)
+        mapped_port = await self.get_mapped_port(internal_port)
+        port = settings.server_port or mapped_port or internal_port
+
         public_key = iface_info["public_key"]
         public_ip = await self.get_server_public_ip()
+        logger.info(f"Server endpoint resolved to: {public_ip}:{port} (internal port: {internal_port}, mapped host port: {mapped_port})")
 
         # Prefer AWG params from dump line, otherwise fallback to config file
         dump_awg = iface_info.get("awg_params") or {}

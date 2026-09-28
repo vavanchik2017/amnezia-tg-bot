@@ -147,7 +147,27 @@ class DockerService:
 
         awg_dump_params = {}
         start_awg_idx = 4 if (len(parts[0]) == 44 and parts[0].endswith("=")) else 5
-        if len(parts) >= start_awg_idx + 9:
+        # If AWG parameters are present in dump: jc, jmin, jmax, s1, s2, s3, s4, h1, h2, h3, h4
+        if len(parts) >= start_awg_idx + 11:
+            try:
+                awg_dump_params = {
+                    "Jc": _parse_p(parts[start_awg_idx]),
+                    "Jmin": _parse_p(parts[start_awg_idx + 1]),
+                    "Jmax": _parse_p(parts[start_awg_idx + 2]),
+                    "S1": _parse_p(parts[start_awg_idx + 3]),
+                    "S2": _parse_p(parts[start_awg_idx + 4]),
+                    "S3": _parse_p(parts[start_awg_idx + 5]),
+                    "S4": _parse_p(parts[start_awg_idx + 6]),
+                    "H1": _parse_p(parts[start_awg_idx + 7]),
+                    "H2": _parse_p(parts[start_awg_idx + 8]),
+                    "H3": _parse_p(parts[start_awg_idx + 9]),
+                    "H4": _parse_p(parts[start_awg_idx + 10])
+                }
+                logger.info(f"Loaded live AWG params from dump line: {awg_dump_params}")
+            except Exception as e:
+                logger.warning(f"Could not parse AWG params from dump line: {e}")
+        elif len(parts) >= start_awg_idx + 9:
+            # Fallback for AWG 1.0 (without s3/s4): jc, jmin, jmax, s1, s2, h1, h2, h3, h4
             try:
                 awg_dump_params = {
                     "Jc": _parse_p(parts[start_awg_idx]),
@@ -160,7 +180,7 @@ class DockerService:
                     "H3": _parse_p(parts[start_awg_idx + 7]),
                     "H4": _parse_p(parts[start_awg_idx + 8])
                 }
-                logger.info(f"Loaded live AWG params from dump line: {awg_dump_params}")
+                logger.info(f"Loaded live AWG 1.0 params from dump line: {awg_dump_params}")
             except Exception as e:
                 logger.warning(f"Could not parse AWG params from dump line: {e}")
 
@@ -284,7 +304,7 @@ class DockerService:
 
         standard_keys = {
             "JC": "Jc", "JMIN": "Jmin", "JMAX": "Jmax",
-            "S1": "S1", "S2": "S2",
+            "S1": "S1", "S2": "S2", "S3": "S3", "S4": "S4",
             "H1": "H1", "H2": "H2", "H3": "H3", "H4": "H4"
         }
 
@@ -306,6 +326,7 @@ class DockerService:
 
             if "=" in line:
                 k, v = [p.strip() for p in line.split("=", 1)]
+                v = v.split("#", 1)[0].split(";", 1)[0].strip()
                 real_key = standard_keys.get(k.upper())
                 if real_key and v:
                     try:
@@ -313,6 +334,7 @@ class DockerService:
                     except ValueError:
                         params[real_key] = v
 
+        logger.info(f"Loaded AWG params from {config_path}: {params}")
         return params
 
     async def get_preshared_key(self) -> Optional[str]:
@@ -433,11 +455,14 @@ class DockerService:
         public_ip = await self.get_server_public_ip()
         logger.info(f"Server endpoint resolved to: {public_ip}:{port} (internal port: {internal_port}, mapped host port: {mapped_port})")
 
-        # Merge config file params with live dump params
+        # Config file params are the primary ground truth for obfuscation parameters
         config_awg = await self.get_awg_params(iface_name)
         dump_awg = iface_info.get("awg_params") or {}
-        awg_params = config_awg.copy()
-        awg_params.update(dump_awg)
+        awg_params = config_awg.copy() if config_awg else {}
+        for k, v in dump_awg.items():
+            if k not in awg_params or awg_params[k] is None:
+                awg_params[k] = v
+        logger.info(f"Resolved server AWG params for issuing configs: {awg_params}")
 
         # Server-wide PSK if Amnezia uses one
         psk = await self.get_preshared_key()

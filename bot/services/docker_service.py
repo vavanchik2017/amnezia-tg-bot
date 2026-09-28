@@ -5,6 +5,7 @@ import urllib.request
 from typing import Dict, List, Optional, Tuple, Any
 import docker
 from bot.config import settings
+from bot.database import models
 
 logger = logging.getLogger(__name__)
 
@@ -136,20 +137,24 @@ class DockerService:
             port = int(parts[3]) if parts[3].isdigit() else parts[3]
             fwmark = parts[4] if len(parts) > 4 else "off"
 
+        def _parse_p(val_str: str):
+            val_str = val_str.strip()
+            return int(val_str) if val_str.isdigit() else val_str
+
         awg_dump_params = {}
         start_awg_idx = 4 if (len(parts[0]) == 44 and parts[0].endswith("=")) else 5
         if len(parts) >= start_awg_idx + 9:
             try:
                 awg_dump_params = {
-                    "Jc": int(parts[start_awg_idx]),
-                    "Jmin": int(parts[start_awg_idx + 1]),
-                    "Jmax": int(parts[start_awg_idx + 2]),
-                    "S1": int(parts[start_awg_idx + 3]),
-                    "S2": int(parts[start_awg_idx + 4]),
-                    "H1": int(parts[start_awg_idx + 5]),
-                    "H2": int(parts[start_awg_idx + 6]),
-                    "H3": int(parts[start_awg_idx + 7]),
-                    "H4": int(parts[start_awg_idx + 8])
+                    "Jc": _parse_p(parts[start_awg_idx]),
+                    "Jmin": _parse_p(parts[start_awg_idx + 1]),
+                    "Jmax": _parse_p(parts[start_awg_idx + 2]),
+                    "S1": _parse_p(parts[start_awg_idx + 3]),
+                    "S2": _parse_p(parts[start_awg_idx + 4]),
+                    "H1": _parse_p(parts[start_awg_idx + 5]),
+                    "H2": _parse_p(parts[start_awg_idx + 6]),
+                    "H3": _parse_p(parts[start_awg_idx + 7]),
+                    "H4": _parse_p(parts[start_awg_idx + 8])
                 }
                 logger.info(f"Loaded live AWG params from dump line: {awg_dump_params}")
             except Exception as e:

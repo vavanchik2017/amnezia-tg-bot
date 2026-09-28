@@ -23,6 +23,20 @@ class Settings(BaseSettings):
         extra="ignore"
     )
 
+    @field_validator("server_port", mode="before")
+    @classmethod
+    def parse_server_port(cls, v):
+        if v is None or v == "":
+            return 0
+        return int(v)
+
+    @field_validator("stats_poll_interval", mode="before")
+    @classmethod
+    def parse_stats_poll_interval(cls, v):
+        if v is None or v == "":
+            return 300
+        return int(v)
+
     @field_validator("admin_ids", mode="before")
     @classmethod
     def parse_admin_ids(cls, v):

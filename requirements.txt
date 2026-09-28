@@ -1,0 +1,6 @@
+aiogram>=3.4.1
+aiosqlite>=0.20.0
+docker>=7.0.0
+cryptography>=42.0.5
+qrcode[pil]>=7.4.2
+pydantic-settings>=2.2.1

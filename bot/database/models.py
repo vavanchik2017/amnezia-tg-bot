@@ -1,0 +1,242 @@
+import datetime
+from typing import Optional, List, Dict, Any
+from bot.database.db import get_db
+
+
+async def add_peer(name: str, public_key: str, private_key: str, ip_address: str) -> int:
+    db = await get_db()
+    cursor = await db.execute(
+        """
+        INSERT INTO peers (name, public_key, private_key, ip_address, is_active)
+        VALUES (?, ?, ?, ?, 1)
+        """,
+        (name, public_key, private_key, ip_address)
+    )
+    await db.commit()
+    return cursor.lastrowid
+
+
+async def get_peer_by_id(peer_id: int) -> Optional[Dict[str, Any]]:
+    db = await get_db()
+    cursor = await db.execute(
+        """
+        SELECT p.*, s.last_handshake, s.last_rx, s.last_tx
+        FROM peers p
+        LEFT JOIN peer_snapshots s ON p.public_key = s.public_key
+        WHERE p.id = ?
+        """,
+        (peer_id,)
+    )
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def get_peer_by_name(name: str) -> Optional[Dict[str, Any]]:
+    db = await get_db()
+    cursor = await db.execute(
+        "SELECT * FROM peers WHERE name = ?",
+        (name,)
+    )
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def get_peer_by_pubkey(public_key: str) -> Optional[Dict[str, Any]]:
+    db = await get_db()
+    cursor = await db.execute(
+        "SELECT * FROM peers WHERE public_key = ?",
+        (public_key,)
+    )
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def get_all_peers() -> List[Dict[str, Any]]:
+    db = await get_db()
+    cursor = await db.execute(
+        """
+        SELECT p.*, s.last_handshake, s.last_rx, s.last_tx
+        FROM peers p
+        LEFT JOIN peer_snapshots s ON p.public_key = s.public_key
+        ORDER BY p.id ASC
+        """
+    )
+    rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+async def toggle_peer_status(peer_id: int, is_active: bool) -> bool:
+    db = await get_db()
+    await db.execute(
+        "UPDATE peers SET is_active = ? WHERE id = ?",
+        (1 if is_active else 0, peer_id)
+    )
+    await db.commit()
+    return True
+
+
+async def delete_peer(peer_id: int) -> bool:
+    db = await get_db()
+    # Also remove snapshot
+    peer = await get_peer_by_id(peer_id)
+    if peer:
+        await db.execute("DELETE FROM peer_snapshots WHERE public_key = ?", (peer["public_key"],))
+        await db.execute("DELETE FROM peers WHERE id = ?", (peer_id,))
+        await db.commit()
+        return True
+    return False
+
+
+async def get_allocated_ips() -> List[str]:
+    db = await get_db()
+    cursor = await db.execute("SELECT ip_address FROM peers")
+    rows = await cursor.fetchall()
+    return [row["ip_address"] for row in rows]
+
+
+async def record_traffic_snapshot(
+    public_key: str,
+    current_rx: int,
+    current_tx: int,
+    latest_handshake: int
+):
+    db = await get_db()
+    # Get previous snapshot
+    cursor = await db.execute(
+        "SELECT last_rx, last_tx FROM peer_snapshots WHERE public_key = ?",
+        (public_key,)
+    )
+    snapshot = await cursor.fetchone()
+
+    delta_rx = 0
+    delta_tx = 0
+
+    if snapshot:
+        last_rx = snapshot["last_rx"]
+        last_tx = snapshot["last_tx"]
+
+        # If counter wrapped or interface restarted, current is the new delta
+        delta_rx = (current_rx - last_rx) if current_rx >= last_rx else current_rx
+        delta_tx = (current_tx - last_tx) if current_tx >= last_tx else current_tx
+    else:
+        # First observation of this peer in snapshots
+        delta_rx = 0
+        delta_tx = 0
+
+    # Save or update snapshot
+    await db.execute(
+        """
+        INSERT INTO peer_snapshots (public_key, last_rx, last_tx, last_handshake, updated_at)
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(public_key) DO UPDATE SET
+            last_rx = excluded.last_rx,
+            last_tx = excluded.last_tx,
+            last_handshake = excluded.last_handshake,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (public_key, current_rx, current_tx, latest_handshake)
+    )
+
+    # If there is traffic to log, find corresponding peer and log it
+    if delta_rx > 0 or delta_tx > 0:
+        cursor_peer = await db.execute(
+            "SELECT id FROM peers WHERE public_key = ?",
+            (public_key,)
+        )
+        peer = await cursor_peer.fetchone()
+        if peer:
+            await db.execute(
+                """
+                INSERT INTO traffic_logs (peer_id, delta_rx, delta_tx, timestamp)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (peer["id"], delta_rx, delta_tx)
+            )
+
+    await db.commit()
+
+
+async def get_peer_traffic_summary(peer_id: int) -> Dict[str, Dict[str, int]]:
+    """
+    Returns traffic stats for:
+    - day (last 24 hours)
+    - week (last 7 days)
+    - month (last 30 days)
+    - year (last 365 days)
+    - all (all time)
+    """
+    db = await get_db()
+    periods = {
+        "day": "-24 hours",
+        "week": "-7 days",
+        "month": "-30 days",
+        "year": "-365 days"
+    }
+
+    result = {}
+    for period_name, sql_mod in periods.items():
+        cursor = await db.execute(
+            f"""
+            SELECT COALESCE(SUM(delta_rx), 0) AS rx, COALESCE(SUM(delta_tx), 0) AS tx
+            FROM traffic_logs
+            WHERE peer_id = ? AND timestamp >= datetime('now', '{sql_mod}')
+            """,
+            (peer_id,)
+        )
+        row = await cursor.fetchone()
+        result[period_name] = {"rx": row["rx"], "tx": row["tx"]}
+
+    # All time
+    cursor_all = await db.execute(
+        """
+        SELECT COALESCE(SUM(delta_rx), 0) AS rx, COALESCE(SUM(delta_tx), 0) AS tx
+        FROM traffic_logs
+        WHERE peer_id = ?
+        """,
+        (peer_id,)
+    )
+    row_all = await cursor_all.fetchone()
+    result["all"] = {"rx": row_all["rx"], "tx": row_all["tx"]}
+
+    return result
+
+
+async def get_overall_traffic_summary() -> Dict[str, Dict[str, int]]:
+    """
+    Returns overall traffic stats for the whole server:
+    - day (last 24 hours)
+    - week (last 7 days)
+    - month (last 30 days)
+    - year (last 365 days)
+    - all (all time)
+    """
+    db = await get_db()
+    periods = {
+        "day": "-24 hours",
+        "week": "-7 days",
+        "month": "-30 days",
+        "year": "-365 days"
+    }
+
+    result = {}
+    for period_name, sql_mod in periods.items():
+        cursor = await db.execute(
+            f"""
+            SELECT COALESCE(SUM(delta_rx), 0) AS rx, COALESCE(SUM(delta_tx), 0) AS tx
+            FROM traffic_logs
+            WHERE timestamp >= datetime('now', '{sql_mod}')
+            """
+        )
+        row = await cursor.fetchone()
+        result[period_name] = {"rx": row["rx"], "tx": row["tx"]}
+
+    cursor_all = await db.execute(
+        """
+        SELECT COALESCE(SUM(delta_rx), 0) AS rx, COALESCE(SUM(delta_tx), 0) AS tx
+        FROM traffic_logs
+        """
+    )
+    row_all = await cursor_all.fetchone()
+    result["all"] = {"rx": row_all["rx"], "tx": row_all["tx"]}
+
+    return result

@@ -46,6 +46,7 @@ class StatsService:
 
     async def collect_stats(self):
         """Polls WireGuard dump and updates DB traffic snapshots."""
+        await docker_service.sync_peers_from_wireguard()
         _, peers = await docker_service.get_wg_dump()
         if not peers:
             return
@@ -55,8 +56,10 @@ class StatsService:
             rx = p.get("rx_bytes", 0)
             tx = p.get("tx_bytes", 0)
             handshake = p.get("latest_handshake", 0)
+            raw_ips = p.get("allowed_ips", "")
+            ip = raw_ips.split("/")[0].strip() if "/" in raw_ips else (raw_ips.strip() or "unknown")
             if pubkey:
-                await models.record_traffic_snapshot(pubkey, rx, tx, handshake)
+                await models.record_traffic_snapshot(pubkey, rx, tx, handshake, fallback_ip=ip)
 
 
 stats_service = StatsService()

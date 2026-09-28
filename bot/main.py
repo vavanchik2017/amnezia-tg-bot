@@ -40,6 +40,10 @@ async def on_startup(bot: Bot):
     logger.info("Initializing database...")
     await init_db()
 
+    logger.info("Syncing existing WireGuard peers from container...")
+    from bot.services.docker_service import docker_service
+    await docker_service.sync_peers_from_wireguard()
+
     logger.info("Starting background stats collector...")
     await stats_service.start()
 

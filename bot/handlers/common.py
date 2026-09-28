@@ -19,6 +19,9 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="📊 Статистика сервера", callback_data="server_stats"),
+            InlineKeyboardButton(text="📈 Трафик по клиентам", callback_data="clients_ranking:day")
+        ],
+        [
             InlineKeyboardButton(text="ℹ️ Статус сервера", callback_data="server_status")
         ]
     ]

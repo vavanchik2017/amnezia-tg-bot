@@ -69,6 +69,7 @@ async def cb_server_status(callback: CallbackQuery):
         return
 
     try:
+        await docker_service.sync_peers_from_wireguard()
         info = await docker_service.get_server_info()
         all_peers = await models.get_all_peers()
         active_peers = [p for p in all_peers if p.get("is_active")]
@@ -80,6 +81,10 @@ async def cb_server_status(callback: CallbackQuery):
             f"H1={awg_p.get('H1')}, H2={awg_p.get('H2')}, H3={awg_p.get('H3')}, H4={awg_p.get('H4')}"
         )
 
+        ip_warn = ""
+        if info['host'] == "127.0.0.1":
+            ip_warn = "\n\n⚠️ <b>Внимание:</b> IP сервера определен как <code>127.0.0.1</code>! Укажите реальный публичный IP в <code>SERVER_HOST</code> в файле <code>.env</code>, чтобы клиенты могли подключаться."
+
         text = (
             f"🟢 <b>Статус сервера AmneziaWG:</b>\n\n"
             f"• <b>Контейнер:</b> <code>{settings.vpn_container_name}</code> (running)\n"
@@ -87,8 +92,9 @@ async def cb_server_status(callback: CallbackQuery):
             f"• <b>Интерфейс:</b> <code>{info['interface']}</code>\n"
             f"• <b>Хост / IP:</b> <code>{info['host']}</code>\n"
             f"• <b>Порт:</b> <code>{info['port']}</code>\n"
-            f"• <b>Клиентов в базе:</b> {len(all_peers)} (активных: {len(active_peers)})\n\n"
+            f"• <b>Клиентов на сервере:</b> {len(all_peers)} (активных: {len(active_peers)})\n\n"
             f"<b>Параметры обфускации:</b>\n<code>{params_str}</code>"
+            f"{ip_warn}"
         )
     except Exception as e:
         text = f"⚠️ <b>Предупреждение при получении данных:</b>\n<code>{html.escape(str(e))}</code>"

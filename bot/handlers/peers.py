@@ -156,16 +156,33 @@ async def send_peer_materials(callback: CallbackQuery, peer_id: int, send_files:
         await callback.message.answer("Конфиг не найден.")
         return
 
+    name = peer["name"]
+    client_ip = peer["ip_address"]
+    client_priv = peer["private_key"]
+    client_pub = peer["public_key"]
+
+    if not client_priv or not client_priv.strip():
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="➕ Выпустить новый конфиг", callback_data="create_peer")],
+                [InlineKeyboardButton(text="👤 К карточке", callback_data=f"view_peer:{peer_id}")]
+            ]
+        )
+        await callback.message.answer(
+            f"ℹ️ <b>Конфиг «{html.escape(name)}» был создан вне бота</b> (импортирован с сервера).\n\n"
+            "Сервер WireGuard хранит только публичный ключ клиента. Приватный ключ находится исключительно на самом клиентском устройстве.\n\n"
+            "Вы можете отслеживать статус и трафик этого клиента, а если нужен новый файл/QR-код — выпустите новый конфиг через бота:",
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
+        return
+
     try:
         server_info = await docker_service.get_server_info()
     except Exception as e:
         await callback.message.answer(f"❌ Ошибка получения параметров сервера: {e}")
         return
 
-    name = peer["name"]
-    client_ip = peer["ip_address"]
-    client_priv = peer["private_key"]
-    client_pub = peer["public_key"]
     host = server_info["host"]
     port = server_info["port"]
     server_pub = server_info["public_key"]
@@ -193,6 +210,13 @@ async def send_peer_materials(callback: CallbackQuery, peer_id: int, send_files:
         awg_params=awg_params
     )
 
+    # Предупреждение об IP
+    if host == "127.0.0.1":
+        await callback.message.answer(
+            "⚠️ <b>Внимание:</b> IP сервера определен как <code>127.0.0.1</code>! Клиенты не смогут подключиться из интернета, пока вы не укажете публичный IP в <code>SERVER_HOST</code> в файле <code>.env</code> на сервере.",
+            parse_mode="HTML"
+        )
+
     # Отправка файлов
     if send_files:
         conf_file = BufferedInputFile(native_conf.encode("utf-8"), filename=f"{name}-native.conf")
@@ -200,12 +224,12 @@ async def send_peer_materials(callback: CallbackQuery, peer_id: int, send_files:
 
         await callback.message.answer_document(
             document=conf_file,
-            caption=f"📄 <b>Native AmneziaWG</b> конфиг для <code>{html.escape(name)}</code>\nИмпортируйте в WireGuard или AmneziaWG.",
+            caption=f"📄 <b>Native AmneziaWG</b> конфиг для <code>{html.escape(name)}</code>\nИмпортируйте в официальное приложение AmneziaWG (Android / iOS / Windows).",
             parse_mode="HTML"
         )
         await callback.message.answer_document(
             document=vpn_file,
-            caption=f"🛡 <b>Amnezia VPN</b> файл для <code>{html.escape(name)}</code>\nИмпортируйте в официальное приложение Amnezia VPN.",
+            caption=f"🛡 <b>Amnezia VPN</b> файл для <code>{html.escape(name)}</code>\nИмпортируйте в приложение Amnezia VPN.",
             parse_mode="HTML"
         )
 
@@ -216,7 +240,7 @@ async def send_peer_materials(callback: CallbackQuery, peer_id: int, send_files:
         qr_conf_file = BufferedInputFile(qr_conf_bio.read(), filename="qr_native.png")
         await callback.message.answer_photo(
             photo=qr_conf_file,
-            caption=f"📱 <b>QR-код Native AmneziaWG</b>\nДля приложения WireGuard / AmneziaWG на смартфоне.",
+            caption=f"📱 <b>QR-код Native AmneziaWG</b> для <code>{html.escape(name)}</code>\n\n⚠️ Сканируйте именно в приложении <b>AmneziaWG</b> (синий официальный WireGuard не поддерживает обфускацию)!",
             parse_mode="HTML"
         )
 
@@ -225,9 +249,17 @@ async def send_peer_materials(callback: CallbackQuery, peer_id: int, send_files:
         qr_vpn_file = BufferedInputFile(qr_vpn_bio.read(), filename="qr_amnezia.png")
         await callback.message.answer_photo(
             photo=qr_vpn_file,
-            caption=f"🛡 <b>QR-код Amnezia VPN</b>\nДля официального приложения Amnezia VPN на смартфоне.",
+            caption=f"🛡 <b>QR-код Amnezia VPN</b> для <code>{html.escape(name)}</code>\nДля сканирования в приложении Amnezia VPN.",
             parse_mode="HTML"
         )
+
+    # Отправка текстовой vpn:// ссылки для мгновенного копирования
+    await callback.message.answer(
+        f"🔗 <b>Ссылка подключения Amnezia VPN для «{html.escape(name)}»:</b>\n\n"
+        f"<code>{vpn_uri}</code>\n\n"
+        f"<i>💡 Нажмите на ссылку, чтобы скопировать. При открытии приложения Amnezia VPN оно само предложит импортировать её из буфера обмена!</i>",
+        parse_mode="HTML"
+    )
 
     # Завершающая кнопка возврата
     kb = InlineKeyboardMarkup(
@@ -236,7 +268,7 @@ async def send_peer_materials(callback: CallbackQuery, peer_id: int, send_files:
             [InlineKeyboardButton(text="👥 Список всех конфигов", callback_data="list_peers:0")]
         ]
     )
-    await callback.message.answer("Готово! Выберите дальнейшее действие:", reply_markup=kb)
+    await callback.message.answer("Выберите дальнейшее действие:", reply_markup=kb)
 
 
 # --- Список и просмотр пиров ---
@@ -244,6 +276,8 @@ async def send_peer_materials(callback: CallbackQuery, peer_id: int, send_files:
 @peers_router.callback_query(IsAdminFilter(), F.data.startswith("list_peers:"))
 async def cb_list_peers(callback: CallbackQuery):
     page = int(callback.data.split(":")[1])
+    # Автоматически синхронизируем всех существующих клиентов с сервера
+    await docker_service.sync_peers_from_wireguard()
     peers = await models.get_all_peers()
 
     if not peers:
@@ -254,7 +288,7 @@ async def cb_list_peers(callback: CallbackQuery):
                 [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")]
             ]
         )
-        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        await safe_edit_message(callback, text, reply_markup=kb, parse_mode="HTML")
         await callback.answer()
         return
 

@@ -113,28 +113,35 @@ class AWGService:
             dns=dns_str
         )
 
+        awg_last_config = {
+            "H1": str(awg_params.get("H1", 1)),
+            "H2": str(awg_params.get("H2", 2)),
+            "H3": str(awg_params.get("H3", 3)),
+            "H4": str(awg_params.get("H4", 4)),
+            "Jc": str(awg_params.get("Jc", 3)),
+            "Jmin": str(awg_params.get("Jmin", 40)),
+            "Jmax": str(awg_params.get("Jmax", 70)),
+            "S1": str(awg_params.get("S1", 15)),
+            "S2": str(awg_params.get("S2", 57)),
+            "client_ip": client_ip,
+            "client_priv_key": client_privkey,
+            "client_pub_key": client_pubkey,
+            "config": native_conf,
+            "hostName": host,
+            "port": str(port),
+            "server_pub_key": server_pubkey,
+            "transport_proto": "udp"
+        }
+
         profile = {
             "containers": [
                 {
                     "container": "amnezia-awg",
                     "awg": {
-                        "H1": str(awg_params.get("H1", 1)),
-                        "H2": str(awg_params.get("H2", 2)),
-                        "H3": str(awg_params.get("H3", 3)),
-                        "H4": str(awg_params.get("H4", 4)),
-                        "Jc": str(awg_params.get("Jc", 3)),
-                        "Jmin": str(awg_params.get("Jmin", 40)),
-                        "Jmax": str(awg_params.get("Jmax", 70)),
-                        "S1": str(awg_params.get("S1", 15)),
-                        "S2": str(awg_params.get("S2", 57)),
-                        "client_ip": client_ip,
-                        "client_priv_key": client_privkey,
-                        "client_pub_key": client_pubkey,
-                        "config": native_conf,
-                        "hostName": host,
+                        "last_config": json.dumps(awg_last_config, ensure_ascii=False),
                         "port": str(port),
-                        "server_pub_key": server_pubkey,
-                        "transport_proto": "udp"
+                        "transport_proto": "udp",
+                        **awg_last_config
                     }
                 }
             ],
@@ -154,12 +161,12 @@ class AWGService:
 
     @staticmethod
     def generate_qr_code(data: str) -> io.BytesIO:
-        """Renders string data into a PNG QR-code BytesIO buffer."""
+        """Renders string data into a crisp PNG QR-code BytesIO buffer."""
         qr = qrcode.QRCode(
             version=None,
-            error_correction=qrcode.constants.ERROR_CORRECT_L,
-            box_size=10,
-            border=2,
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            box_size=8,
+            border=4,
         )
         qr.add_data(data)
         qr.make(fit=True)

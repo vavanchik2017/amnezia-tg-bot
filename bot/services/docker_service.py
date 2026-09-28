@@ -136,12 +136,32 @@ class DockerService:
             port = int(parts[3]) if parts[3].isdigit() else parts[3]
             fwmark = parts[4] if len(parts) > 4 else "off"
 
+        awg_dump_params = {}
+        start_awg_idx = 4 if (len(parts[0]) == 44 and parts[0].endswith("=")) else 5
+        if len(parts) >= start_awg_idx + 9:
+            try:
+                awg_dump_params = {
+                    "Jc": int(parts[start_awg_idx]),
+                    "Jmin": int(parts[start_awg_idx + 1]),
+                    "Jmax": int(parts[start_awg_idx + 2]),
+                    "S1": int(parts[start_awg_idx + 3]),
+                    "S2": int(parts[start_awg_idx + 4]),
+                    "H1": int(parts[start_awg_idx + 5]),
+                    "H2": int(parts[start_awg_idx + 6]),
+                    "H3": int(parts[start_awg_idx + 7]),
+                    "H4": int(parts[start_awg_idx + 8])
+                }
+                logger.info(f"Loaded live AWG params from dump line: {awg_dump_params}")
+            except Exception as e:
+                logger.warning(f"Could not parse AWG params from dump line: {e}")
+
         interface_info = {
             "interface": iface,
             "private_key": privkey,
             "public_key": pubkey,
             "listen_port": port,
-            "fwmark": fwmark
+            "fwmark": fwmark,
+            "awg_params": awg_dump_params
         }
 
         # Subsequent lines are peers
@@ -212,6 +232,14 @@ class DockerService:
                 self._config_file_path = path
                 return path
 
+        # Try searching with grep for H1 or Jc in /etc and /opt
+        code, out = await self.exec_cmd("grep -l -E 'H1|Jc' /etc/*.conf /etc/*/*.conf /etc/*/*/*.conf /opt/*/*.conf /opt/*/*/*.conf 2>/dev/null")
+        if code == 0 and out.strip():
+            first_found = out.splitlines()[0].strip()
+            self._config_file_path = first_found
+            logger.info(f"Located AWG config file: {first_found}")
+            return first_found
+
         # Try searching with find
         code, out = await self.exec_cmd("find /etc /opt -name '*.conf' 2>/dev/null")
         if code == 0 and out:
@@ -262,25 +290,35 @@ class DockerService:
 
     async def get_server_public_ip(self) -> str:
         """Determines public IP of the host."""
-        if settings.server_host:
-            return settings.server_host
+        if settings.server_host and settings.server_host.strip() and settings.server_host.strip() != "127.0.0.1":
+            return settings.server_host.strip()
+
+        # Try from inside VPN container (has network access)
+        code, out = await self.exec_cmd("curl -4 -s --connect-timeout 2 https://api.ipify.org || wget -qO- --timeout=2 https://api.ipify.org || curl -4 -s --connect-timeout 2 https://ifconfig.me")
+        if code == 0 and out.strip() and re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", out.strip()):
+            ip = out.strip()
+            logger.info(f"Detected public IP via container: {ip}")
+            return ip
 
         def _fetch_ip():
             for url in ["https://api.ipify.org", "https://ifconfig.me/ip", "https://icanhazip.com"]:
                 try:
                     req = urllib.request.Request(url, headers={"User-Agent": "curl/7.68.0"})
                     with urllib.request.urlopen(req, timeout=3) as resp:
-                        return resp.read().decode("utf-8").strip()
+                        res = resp.read().decode("utf-8").strip()
+                        if re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", res):
+                            return res
                 except Exception:
                     continue
             return "127.0.0.1"
 
         ip = await asyncio.to_thread(_fetch_ip)
+        logger.info(f"Public IP detection result: {ip}")
         return ip
 
     async def get_server_info(self) -> Dict[str, Any]:
         """Collects all server parameters needed to issue client configs."""
-        if self._cached_server_info and self._cached_server_info.get("public_key"):
+        if self._cached_server_info and self._cached_server_info.get("public_key") and self._cached_server_info.get("host") != "127.0.0.1":
             return self._cached_server_info
 
         iface_info, _ = await self.get_wg_dump()
@@ -292,7 +330,14 @@ class DockerService:
         port = settings.server_port or iface_info["listen_port"]
         public_key = iface_info["public_key"]
         public_ip = await self.get_server_public_ip()
-        awg_params = await self.get_awg_params(iface_name)
+
+        # Prefer AWG params from dump line, otherwise fallback to config file
+        dump_awg = iface_info.get("awg_params") or {}
+        if len(dump_awg) == 9:
+            awg_params = dump_awg
+        else:
+            awg_params = await self.get_awg_params(iface_name)
+            awg_params.update(dump_awg)
 
         info = {
             "interface": iface_name,
@@ -303,6 +348,78 @@ class DockerService:
         }
         self._cached_server_info = info
         return info
+
+    async def parse_peer_names_from_config(self) -> Dict[str, str]:
+        """Tries to read human-readable peer names from config comments."""
+        names = {}
+        try:
+            iface_info, _ = await self.get_wg_dump()
+            iface = iface_info["interface"] if iface_info else "awg0"
+            config_path = await self.find_config_file(iface)
+            if not config_path:
+                return names
+
+            code, content = await self.exec_cmd(f"cat {config_path}")
+            if code != 0 or not content:
+                return names
+
+            current_comment = None
+            for line in content.splitlines():
+                line = line.strip()
+                if line.startswith("#"):
+                    clean = line.lstrip("#").strip()
+                    if clean and not clean.startswith("Added by") and not clean.startswith("Auto"):
+                        if "=" in clean:
+                            clean = clean.split("=", 1)[1].strip()
+                        elif ":" in clean:
+                            clean = clean.split(":", 1)[1].strip()
+                        current_comment = clean
+                elif line.startswith("[Peer]"):
+                    pass
+                elif line.startswith("PublicKey"):
+                    parts = line.split("=", 1)
+                    if len(parts) == 2:
+                        pub = parts[1].strip()
+                        if current_comment:
+                            names[pub] = current_comment
+                            current_comment = None
+                elif not line:
+                    current_comment = None
+        except Exception as e:
+            logger.warning(f"Could not parse peer names from config: {e}")
+        return names
+
+    async def sync_peers_from_wireguard(self):
+        """Syncs all peers currently present in WireGuard interface into the database."""
+        try:
+            _, wg_peers = await self.get_wg_dump()
+            if not wg_peers:
+                return
+
+            config_names = await self.parse_peer_names_from_config()
+
+            for p in wg_peers:
+                pubkey = p.get("public_key")
+                if not pubkey:
+                    continue
+                raw_ips = p.get("allowed_ips", "")
+                ip = raw_ips.split("/")[0].strip() if "/" in raw_ips else (raw_ips.strip() or "10.8.0.x")
+
+                existing = await models.get_peer_by_pubkey(pubkey)
+                if not existing:
+                    name = config_names.get(pubkey)
+                    if not name:
+                        clean_ip = ip.replace(".", "_")
+                        name = f"Client-{clean_ip}"
+
+                    existing_name = await models.get_peer_by_name(name)
+                    if existing_name:
+                        name = f"{name}-{pubkey[:4]}"
+
+                    await models.import_external_peer(name, pubkey, ip)
+                    logger.info(f"Imported WireGuard peer into database: {name} (IP: {ip})")
+        except Exception as e:
+            logger.error(f"Error during sync_peers_from_wireguard: {e}", exc_info=True)
 
     async def backup_config_file(self, config_path: str):
         """Creates a timestamped backup copy of the config file inside container."""

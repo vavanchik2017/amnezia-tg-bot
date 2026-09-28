@@ -87,6 +87,22 @@ async def delete_peer(peer_id: int) -> bool:
     return False
 
 
+async def import_external_peer(name: str, public_key: str, ip_address: str) -> int:
+    db = await get_db()
+    cursor = await db.execute(
+        """
+        INSERT INTO peers (name, public_key, private_key, ip_address, is_active)
+        VALUES (?, ?, '', ?, 1)
+        ON CONFLICT(public_key) DO UPDATE SET
+            ip_address = excluded.ip_address,
+            is_active = 1
+        """,
+        (name, public_key, ip_address)
+    )
+    await db.commit()
+    return cursor.lastrowid
+
+
 async def get_allocated_ips() -> List[str]:
     db = await get_db()
     cursor = await db.execute("SELECT ip_address FROM peers")
@@ -98,7 +114,8 @@ async def record_traffic_snapshot(
     public_key: str,
     current_rx: int,
     current_tx: int,
-    latest_handshake: int
+    latest_handshake: int,
+    fallback_ip: str = "unknown"
 ):
     db = await get_db()
     # Get previous snapshot
@@ -144,6 +161,16 @@ async def record_traffic_snapshot(
             (public_key,)
         )
         peer = await cursor_peer.fetchone()
+        if not peer:
+            # Auto-register this peer into peers table
+            auto_name = f"Client-{public_key[:8]}"
+            await import_external_peer(auto_name, public_key, fallback_ip)
+            cursor_peer = await db.execute(
+                "SELECT id FROM peers WHERE public_key = ?",
+                (public_key,)
+            )
+            peer = await cursor_peer.fetchone()
+
         if peer:
             await db.execute(
                 """
@@ -240,3 +267,49 @@ async def get_overall_traffic_summary() -> Dict[str, Dict[str, int]]:
     result["all"] = {"rx": row_all["rx"], "tx": row_all["tx"]}
 
     return result
+
+
+async def get_clients_traffic_ranking(period: str = "day") -> List[Dict[str, Any]]:
+    """
+    Returns list of all peers with their traffic for the period,
+    sorted by total traffic descending.
+    """
+    db = await get_db()
+    sql_mod = {
+        "day": "-24 hours",
+        "week": "-7 days",
+        "month": "-30 days",
+        "year": "-365 days",
+        "all": None
+    }.get(period, "-24 hours")
+
+    if sql_mod:
+        query = f"""
+            SELECT p.id, p.name, p.ip_address, p.is_active,
+                   COALESCE(s.last_handshake, 0) AS last_handshake,
+                   COALESCE(SUM(l.delta_rx), 0) AS rx,
+                   COALESCE(SUM(l.delta_tx), 0) AS tx,
+                   (COALESCE(SUM(l.delta_rx), 0) + COALESCE(SUM(l.delta_tx), 0)) AS total
+            FROM peers p
+            LEFT JOIN peer_snapshots s ON p.public_key = s.public_key
+            LEFT JOIN traffic_logs l ON p.id = l.peer_id AND l.timestamp >= datetime('now', '{sql_mod}')
+            GROUP BY p.id
+            ORDER BY total DESC, p.id ASC
+        """
+    else:
+        query = """
+            SELECT p.id, p.name, p.ip_address, p.is_active,
+                   COALESCE(s.last_handshake, 0) AS last_handshake,
+                   COALESCE(SUM(l.delta_rx), 0) AS rx,
+                   COALESCE(SUM(l.delta_tx), 0) AS tx,
+                   (COALESCE(SUM(l.delta_rx), 0) + COALESCE(SUM(l.delta_tx), 0)) AS total
+            FROM peers p
+            LEFT JOIN peer_snapshots s ON p.public_key = s.public_key
+            LEFT JOIN traffic_logs l ON p.id = l.peer_id
+            GROUP BY p.id
+            ORDER BY total DESC, p.id ASC
+        """
+    cursor = await db.execute(query)
+    rows = await cursor.fetchall()
+    return [dict(r) for r in rows]
+

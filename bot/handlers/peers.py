@@ -18,6 +18,7 @@ from bot.handlers.common import (
     get_download_format_keyboard,
     safe_edit_message
 )
+from bot.config import settings
 from bot.database import models
 from bot.services.docker_service import docker_service
 from bot.services.awg_service import awg_service

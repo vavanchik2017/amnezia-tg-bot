@@ -11,13 +11,29 @@ from bot.database.db import init_db, close_db
 from bot.services.stats_service import stats_service
 from bot.handlers import admin_router, peers_router, stats_router
 
-# Configure logging
+import os
+from logging.handlers import RotatingFileHandler
+
+# Configure logging to stdout and rotating file in data directory
+log_dir = os.path.dirname(settings.db_path)
+if log_dir:
+    os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, "bot.log")
+
+log_formatter = logging.Formatter("%(asctime)s [%(levelname)s] [%(name)s]: %(message)s")
+
+stream_handler = logging.StreamHandler(sys.stdout)
+stream_handler.setFormatter(log_formatter)
+
+file_handler = RotatingFileHandler(log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8")
+file_handler.setFormatter(log_formatter)
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
+    handlers=[stream_handler, file_handler]
 )
 logger = logging.getLogger("amnezia_bot")
+
 
 
 async def on_startup(bot: Bot):

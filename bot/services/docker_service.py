@@ -223,41 +223,56 @@ class DockerService:
         self._cached_server_info = info
         return info
 
+    async def backup_config_file(self, config_path: str):
+        """Creates a timestamped backup copy of the config file inside container."""
+        backup_cmd = f"cp {config_path} {config_path}.bak.$(date +%s)"
+        code, _ = await self.exec_cmd(backup_cmd)
+        if code == 0:
+            logger.info(f"Safety backup created for {config_path}")
+        else:
+            logger.warning(f"Could not create safety backup for {config_path}")
+
     async def add_peer_runtime(self, public_key: str, ip_address: str):
-        """Adds peer to running WireGuard interface."""
+        """Adds peer to running WireGuard interface safely without resetting existing connections."""
         server_info = await self.get_server_info()
         iface = server_info["interface"]
+        logger.info(f"Adding peer {public_key[:12]}... (IP: {ip_address}) to interface {iface}")
         cmd = f"{self._wg_bin} set {iface} peer {public_key} allowed-ips {ip_address}/32"
         code, out = await self.exec_cmd(cmd)
         if code != 0:
+            logger.error(f"Failed to add peer in WireGuard: {out}")
             raise RuntimeError(f"Failed to add peer in WireGuard: {out}")
 
         # Also append to config file if found to persist across reboots
         config_path = await self.find_config_file(iface)
         if config_path:
+            await self.backup_config_file(config_path)
             peer_block = f"\n# Added by AmneziaBot\n[Peer]\nPublicKey = {public_key}\nAllowedIPs = {ip_address}/32\n"
-            # Append safely
             append_cmd = f"printf '{peer_block}' >> {config_path}"
             await self.exec_cmd(append_cmd)
+            logger.info(f"Peer {public_key[:12]}... appended to {config_path}")
 
     async def remove_peer_runtime(self, public_key: str):
-        """Removes peer from WireGuard interface and config file."""
+        """Removes peer from WireGuard interface and config file safely."""
         server_info = await self.get_server_info()
         iface = server_info["interface"]
+        logger.info(f"Removing peer {public_key[:12]}... from interface {iface}")
         cmd = f"{self._wg_bin} set {iface} peer {public_key} remove"
         code, out = await self.exec_cmd(cmd)
 
         # Remove peer block from config file if found
         config_path = await self.find_config_file(iface)
         if config_path:
-            # Sed script to delete the Peer section containing this public_key
+            await self.backup_config_file(config_path)
             script = f"sed -i '/PublicKey = {re.escape(public_key)}/{{n;d}}' {config_path} 2>/dev/null; sed -i '/PublicKey = {re.escape(public_key)}/d' {config_path} 2>/dev/null"
             await self.exec_cmd(script)
+            logger.info(f"Peer {public_key[:12]}... removed from {config_path}")
 
     async def disable_peer_runtime(self, public_key: str):
         """Temporarily disconnects peer by removing from running interface."""
         server_info = await self.get_server_info()
         iface = server_info["interface"]
+        logger.info(f"Temporarily disabling peer {public_key[:12]}... on interface {iface}")
         cmd = f"{self._wg_bin} set {iface} peer {public_key} remove"
         await self.exec_cmd(cmd)
 
@@ -265,9 +280,11 @@ class DockerService:
         """Re-enables peer on running interface."""
         server_info = await self.get_server_info()
         iface = server_info["interface"]
+        logger.info(f"Re-enabling peer {public_key[:12]}... on interface {iface}")
         cmd = f"{self._wg_bin} set {iface} peer {public_key} allowed-ips {ip_address}/32"
         code, out = await self.exec_cmd(cmd)
         if code != 0:
+            logger.error(f"Failed to re-enable peer: {out}")
             raise RuntimeError(f"Failed to re-enable peer: {out}")
 
 

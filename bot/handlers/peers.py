@@ -191,6 +191,8 @@ async def send_peer_materials(callback: CallbackQuery, peer_id: int, send_files:
     port = server_info["port"]
     server_pub = server_info["public_key"]
     awg_params = server_info["awg_params"]
+    preshared_key = server_info.get("preshared_key")
+    target_container = settings.vpn_container_name or "amnezia-awg2"
 
     # Формируем Native Conf
     native_conf = awg_service.build_native_conf(
@@ -199,7 +201,8 @@ async def send_peer_materials(callback: CallbackQuery, peer_id: int, send_files:
         server_pubkey=server_pub,
         host=host,
         port=port,
-        awg_params=awg_params
+        awg_params=awg_params,
+        preshared_key=preshared_key
     )
 
     # Формируем Amnezia VPN (.vpn) JSON и ссылку
@@ -211,7 +214,9 @@ async def send_peer_materials(callback: CallbackQuery, peer_id: int, send_files:
         server_pubkey=server_pub,
         host=host,
         port=port,
-        awg_params=awg_params
+        awg_params=awg_params,
+        preshared_key=preshared_key,
+        container_name=target_container
     )
 
     # Предупреждение об IP

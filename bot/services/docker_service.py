@@ -3,6 +3,7 @@ import base64
 import json
 import logging
 import re
+import time
 import urllib.request
 from typing import Dict, List, Optional, Tuple, Any
 import docker
@@ -16,6 +17,7 @@ class DockerService:
     def __init__(self):
         self._client = None
         self._cached_server_info: Optional[Dict[str, Any]] = None
+        self._cached_psk: Optional[str] = None
         self._config_file_path: Optional[str] = None
         self._wg_bin = "wg"
 
@@ -280,20 +282,70 @@ class DockerService:
         if code != 0 or not content:
             return params
 
+        known_map = {
+            "JC": "Jc", "JMIN": "Jmin", "JMAX": "Jmax",
+            "S1": "S1", "S2": "S2", "S3": "S3", "S4": "S4",
+            "H1": "H1", "H2": "H2", "H3": "H3", "H4": "H4",
+            "I1": "I1", "I2": "I2", "I3": "I3", "I4": "I4", "I5": "I5",
+            "HEADERPROTECTIONKEY": "HeaderProtectionKey",
+            "CONTENTPADDINGADDITION": "ContentPaddingAddition",
+            "REKEYAFTERTIME": "RekeyAfterTime",
+            "REKEYTIMEOUT": "RekeyTimeout",
+            "REJECTAFTERTIME": "RejectAfterTime",
+            "KEEPALIVETIMEOUT": "KeepaliveTimeout",
+            "MAXHANDSHAKEATTEMPTS": "MaxHandshakeAttempts",
+            "RANDOMTRAILERS": "RandomTrailers",
+            "DISABLECOOKIES": "DisableCookies"
+        }
+
         for line in content.splitlines():
             line = line.strip()
-            if "=" in line and not line.startswith("#"):
-                key, val = [p.strip() for p in line.split("=", 1)]
-                key_upper = key.upper()
-                for k in ["JC", "JMIN", "JMAX", "S1", "S2", "H1", "H2", "H3", "H4"]:
-                    if key_upper == k:
-                        real_key = "Jc" if k == "JC" else ("Jmin" if k == "JMIN" else ("Jmax" if k == "JMAX" else k.capitalize()))
-                        try:
-                            params[real_key] = int(val)
-                        except ValueError:
-                            params[real_key] = val
+            if line.startswith("[Peer]"):
+                break
+            is_commented = line.startswith("#")
+            clean_line = line.lstrip("#").strip() if is_commented else line
+            if "=" in clean_line and not clean_line.startswith("["):
+                k, v = [p.strip() for p in clean_line.split("=", 1)]
+                real_key = known_map.get(k.upper())
+                if real_key:
+                    if v and not v.startswith("#") and "[Peer]" not in v:
+                        parsed_val = int(v) if v.isdigit() else v
+                        if not is_commented:
+                            params[real_key] = parsed_val
+                        elif real_key not in params or params[real_key] is None:
+                            params[real_key] = parsed_val
 
         return params
+
+    async def get_preshared_key(self) -> Optional[str]:
+        """Reads server-wide PSK if Amnezia uses one."""
+        if self._cached_psk:
+            return self._cached_psk
+
+        candidates = [
+            "/opt/amnezia/awg/wireguard_psk.key",
+            "/opt/amnezia/awg/psk.key",
+            "/etc/amnezia/amneziawg/wireguard_psk.key",
+            "/etc/wireguard/psk.key"
+        ]
+        for path in candidates:
+            code, out = await self.exec_cmd(f"cat {path} 2>/dev/null")
+            clean_out = out.strip()
+            if code == 0 and clean_out and len(clean_out) == 44:
+                logger.info(f"Loaded server preshared key from {path}")
+                self._cached_psk = clean_out
+                return clean_out
+
+        # Also inspect existing peers from wg dump if any peer has a valid base64 44-char PSK
+        _, peers = await self.get_wg_dump()
+        for p in peers:
+            psk = p.get("preshared_key")
+            if psk and psk != "(none)" and len(psk) == 44:
+                logger.info("Loaded server preshared key from active peer in dump")
+                self._cached_psk = psk
+                return psk
+
+        return None
 
     async def get_server_public_ip(self) -> str:
         """Determines public IP of the host."""
@@ -366,20 +418,22 @@ class DockerService:
         public_ip = await self.get_server_public_ip()
         logger.info(f"Server endpoint resolved to: {public_ip}:{port} (internal port: {internal_port}, mapped host port: {mapped_port})")
 
-        # Prefer AWG params from dump line, otherwise fallback to config file
+        # Merge config file params with live dump params
+        config_awg = await self.get_awg_params(iface_name)
         dump_awg = iface_info.get("awg_params") or {}
-        if len(dump_awg) == 9:
-            awg_params = dump_awg
-        else:
-            awg_params = await self.get_awg_params(iface_name)
-            awg_params.update(dump_awg)
+        awg_params = config_awg.copy()
+        awg_params.update(dump_awg)
+
+        # Server-wide PSK if Amnezia uses one
+        psk = await self.get_preshared_key()
 
         info = {
             "interface": iface_name,
             "port": port,
             "public_key": public_key,
             "host": public_ip,
-            "awg_params": awg_params
+            "awg_params": awg_params,
+            "preshared_key": psk
         }
         self._cached_server_info = info
         return info
@@ -616,23 +670,37 @@ class DockerService:
                 return
 
             table = json.loads(content)
+            now_str = time.ctime()
             new_client = {
-                "clientId": len(table) if isinstance(table, list) else len(table.keys()),
-                "clientName": name,
-                "client_ip": ip_address,
-                "client_priv_key": private_key,
-                "client_pub_key": public_key,
-                "userData": name
+                "clientId": public_key,
+                "userData": {
+                    "allowedIps": f"{ip_address}/32",
+                    "allowed_ips": f"{ip_address}/32",
+                    "clientName": name,
+                    "creationDate": now_str,
+                    "dataReceived": "0 B",
+                    "dataSent": "0 B",
+                    "latestHandshake": "0"
+                }
             }
 
             if isinstance(table, list):
-                if not any(isinstance(c, dict) and (c.get("client_pub_key") == public_key or c.get("publicKey") == public_key) for c in table):
+                found = False
+                for c in table:
+                    if isinstance(c, dict) and (c.get("clientId") == public_key or c.get("client_pub_key") == public_key or c.get("publicKey") == public_key):
+                        if isinstance(c.get("userData"), dict):
+                            c["userData"]["clientName"] = name
+                            c["userData"]["allowedIps"] = f"{ip_address}/32"
+                            c["userData"]["allowed_ips"] = f"{ip_address}/32"
+                        found = True
+                        break
+                if not found:
                     table.append(new_client)
             elif isinstance(table, dict):
                 if "clients" in table and isinstance(table["clients"], list):
                     table["clients"].append(new_client)
                 else:
-                    table[str(new_client["clientId"])] = new_client
+                    table[public_key] = new_client
 
             await self.backup_config_file(path)
             new_json = json.dumps(table, indent=2, ensure_ascii=False)
@@ -661,13 +729,27 @@ class DockerService:
             changed = False
 
             if isinstance(table, list):
-                new_list = [c for c in table if not (isinstance(c, dict) and (c.get("client_pub_key") == public_key or c.get("publicKey") == public_key))]
+                new_list = [
+                    c for c in table
+                    if not (isinstance(c, dict) and (
+                        c.get("clientId") == public_key or
+                        c.get("client_pub_key") == public_key or
+                        c.get("publicKey") == public_key
+                    ))
+                ]
                 if len(new_list) != len(table):
                     table = new_list
                     changed = True
             elif isinstance(table, dict):
                 if "clients" in table and isinstance(table["clients"], list):
-                    new_list = [c for c in table["clients"] if not (isinstance(c, dict) and (c.get("client_pub_key") == public_key or c.get("publicKey") == public_key))]
+                    new_list = [
+                        c for c in table["clients"]
+                        if not (isinstance(c, dict) and (
+                            c.get("clientId") == public_key or
+                            c.get("client_pub_key") == public_key or
+                            c.get("publicKey") == public_key
+                        ))
+                    ]
                     if len(new_list) != len(table["clients"]):
                         table["clients"] = new_list
                         changed = True
@@ -696,12 +778,12 @@ class DockerService:
 
             items = table if isinstance(table, list) else (table.get("clients", []) if isinstance(table, dict) and "clients" in table else table.values())
             for c in items:
-                if isinstance(c, dict) and (c.get("client_pub_key") == public_key or c.get("publicKey") == public_key):
-                    for key in ["clientName", "client_name", "name", "userData"]:
-                        if key in c:
-                            c[key] = new_name
-                    if not any(k in c for k in ["clientName", "client_name", "name"]):
-                        c["clientName"] = new_name
+                if isinstance(c, dict) and (c.get("clientId") == public_key or c.get("client_pub_key") == public_key or c.get("publicKey") == public_key):
+                    if isinstance(c.get("userData"), dict):
+                        c["userData"]["clientName"] = new_name
+                    else:
+                        c["userData"] = new_name
+                    c["clientName"] = new_name
                     changed = True
 
             if changed:
@@ -873,9 +955,21 @@ class DockerService:
         """Adds peer to running WireGuard interface safely without resetting existing connections."""
         server_info = await self.get_server_info()
         iface = server_info["interface"]
-        logger.info(f"Adding peer {public_key[:12]}... (IP: {ip_address}) to interface {iface}")
-        cmd = f"{self._wg_bin} set {iface} peer {public_key} allowed-ips {ip_address}/32"
-        code, out = await self.exec_cmd(cmd)
+        psk = server_info.get("preshared_key")
+        logger.info(f"Adding peer {public_key[:12]}... (IP: {ip_address}) to interface {iface} (PSK: {'yes' if psk else 'no'})")
+
+        clean_pk_id = re.sub(r'[^a-zA-Z0-9]', '', public_key[:8]) or "peer"
+        if psk:
+            tmp_psk_file = f"/tmp/psk_{clean_pk_id}.tmp"
+            set_cmd = (
+                f"printf '%s' '{psk}' > {tmp_psk_file} && "
+                f"{self._wg_bin} set {iface} peer {public_key} preshared-key {tmp_psk_file} allowed-ips {ip_address}/32 && "
+                f"rm -f {tmp_psk_file}"
+            )
+        else:
+            set_cmd = f"{self._wg_bin} set {iface} peer {public_key} allowed-ips {ip_address}/32"
+
+        code, out = await self.exec_cmd(set_cmd)
         if code != 0:
             logger.error(f"Failed to add peer in WireGuard: {out}")
             raise RuntimeError(f"Failed to add peer in WireGuard: {out}")
@@ -885,7 +979,8 @@ class DockerService:
         if config_path:
             await self.backup_config_file(config_path)
             comment = f"# {name}" if name else "# Added by AmneziaBot"
-            peer_block = f"\n{comment}\n[Peer]\nPublicKey = {public_key}\nAllowedIPs = {ip_address}/32\n"
+            psk_line = f"PresharedKey = {psk}\n" if psk else ""
+            peer_block = f"\n{comment}\n[Peer]\nPublicKey = {public_key}\n{psk_line}AllowedIPs = {ip_address}/32\n"
             append_cmd = f"printf '{peer_block}' >> {config_path}"
             await self.exec_cmd(append_cmd)
             logger.info(f"Peer {public_key[:12]}... appended to {config_path}")
@@ -925,8 +1020,18 @@ class DockerService:
         """Re-enables peer on running interface."""
         server_info = await self.get_server_info()
         iface = server_info["interface"]
-        logger.info(f"Re-enabling peer {public_key[:12]}... on interface {iface}")
-        cmd = f"{self._wg_bin} set {iface} peer {public_key} allowed-ips {ip_address}/32"
+        psk = server_info.get("preshared_key")
+        logger.info(f"Re-enabling peer {public_key[:12]}... on interface {iface} (PSK: {'yes' if psk else 'no'})")
+        clean_pk_id = re.sub(r'[^a-zA-Z0-9]', '', public_key[:8]) or "peer"
+        if psk:
+            tmp_psk_file = f"/tmp/psk_{clean_pk_id}.tmp"
+            cmd = (
+                f"printf '%s' '{psk}' > {tmp_psk_file} && "
+                f"{self._wg_bin} set {iface} peer {public_key} preshared-key {tmp_psk_file} allowed-ips {ip_address}/32 && "
+                f"rm -f {tmp_psk_file}"
+            )
+        else:
+            cmd = f"{self._wg_bin} set {iface} peer {public_key} allowed-ips {ip_address}/32"
         code, out = await self.exec_cmd(cmd)
         if code != 0:
             logger.error(f"Failed to re-enable peer: {out}")

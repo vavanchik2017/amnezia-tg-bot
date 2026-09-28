@@ -2,7 +2,9 @@ import base64
 import io
 import ipaddress
 import json
+import struct
 import time
+import zlib
 from typing import Dict, List, Optional, Tuple, Any
 import qrcode
 from cryptography.hazmat.primitives.asymmetric import x25519
@@ -57,30 +59,63 @@ class AWGService:
         host: str,
         port: int,
         awg_params: Dict[str, Any],
-        dns: Optional[str] = None
+        dns: Optional[str] = None,
+        preshared_key: Optional[str] = None
     ) -> str:
         """Builds standard AmneziaWG .conf file."""
         dns_str = dns or settings.client_dns
-        return (
-            f"[Interface]\n"
-            f"Address = {client_ip}/32\n"
-            f"PrivateKey = {client_privkey}\n"
-            f"DNS = {dns_str}\n"
-            f"Jc = {awg_params.get('Jc', 3)}\n"
-            f"Jmin = {awg_params.get('Jmin', 40)}\n"
-            f"Jmax = {awg_params.get('Jmax', 70)}\n"
-            f"S1 = {awg_params.get('S1', 15)}\n"
-            f"S2 = {awg_params.get('S2', 57)}\n"
-            f"H1 = {awg_params.get('H1', 1)}\n"
-            f"H2 = {awg_params.get('H2', 2)}\n"
-            f"H3 = {awg_params.get('H3', 3)}\n"
-            f"H4 = {awg_params.get('H4', 4)}\n\n"
-            f"[Peer]\n"
-            f"PublicKey = {server_pubkey}\n"
-            f"Endpoint = {host}:{port}\n"
-            f"AllowedIPs = 0.0.0.0/0, ::/0\n"
-            f"PersistentKeepalive = 25\n"
-        )
+
+        lines = [
+            "[Interface]",
+            f"Address = {client_ip}/32",
+            f"PrivateKey = {client_privkey}",
+            f"DNS = {dns_str}"
+        ]
+
+        # Standard and advanced AWG params
+        keys_order = [
+            "Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4",
+            "H1", "H2", "H3", "H4",
+            "I1", "I2", "I3", "I4", "I5",
+            "HeaderProtectionKey", "ContentPaddingAddition",
+            "RekeyAfterTime", "RekeyTimeout", "RejectAfterTime",
+            "KeepaliveTimeout", "MaxHandshakeAttempts",
+            "RandomTrailers", "DisableCookies"
+        ]
+        defaults = {
+            "Jc": 3, "Jmin": 40, "Jmax": 70, "S1": 15, "S2": 57,
+            "H1": 1, "H2": 2, "H3": 3, "H4": 4
+        }
+
+        for k in keys_order:
+            if k in awg_params and awg_params[k] is not None and str(awg_params[k]).strip() != "":
+                lines.append(f"{k} = {awg_params[k]}")
+            elif k in defaults:
+                lines.append(f"{k} = {defaults[k]}")
+
+        lines.append("")
+        lines.append("[Peer]")
+        lines.append(f"PublicKey = {server_pubkey}")
+        if preshared_key and preshared_key.strip():
+            lines.append(f"PresharedKey = {preshared_key.strip()}")
+        lines.append(f"Endpoint = {host}:{port}")
+        lines.append("AllowedIPs = 0.0.0.0/0, ::/0")
+        lines.append("PersistentKeepalive = 25\n")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def encode_vpn_uri(profile: dict) -> str:
+        """
+        Encodes server profile JSON into Amnezia's official vpn://<base64url> format:
+        4-byte Big-Endian length header + zlib deflate (level 8) + URL-safe base64.
+        """
+        raw_data = json.dumps(profile, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        header = struct.pack(">I", len(raw_data))
+        compressed = zlib.compress(raw_data, level=8)
+        payload = header + compressed
+        b64url = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+        return f"vpn://{b64url}"
 
     @staticmethod
     def build_amnezia_vpn_json(
@@ -92,12 +127,16 @@ class AWGService:
         host: str,
         port: int,
         awg_params: Dict[str, Any],
-        dns: Optional[str] = None
+        dns: Optional[str] = None,
+        preshared_key: Optional[str] = None,
+        container_name: Optional[str] = None
     ) -> Tuple[str, str]:
         """
         Builds Amnezia VPN (.vpn) JSON profile and vpn:// connection link.
+        Uses modern AmneziaWG 2.0 / 3.x schema and official Amnezia vpn:// encoding.
         Returns: (json_string, vpn_uri)
         """
+        target_container = container_name or settings.vpn_container_name or "amnezia-awg2"
         dns_str = dns or settings.client_dns
         dns_parts = [d.strip() for d in dns_str.split(",") if d.strip()]
         dns1 = dns_parts[0] if len(dns_parts) > 0 else "1.1.1.1"
@@ -110,42 +149,63 @@ class AWGService:
             host=host,
             port=port,
             awg_params=awg_params,
-            dns=dns_str
+            dns=dns_str,
+            preshared_key=preshared_key
         )
 
+        keys_order = [
+            "Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4",
+            "H1", "H2", "H3", "H4",
+            "I1", "I2", "I3", "I4", "I5",
+            "HeaderProtectionKey", "ContentPaddingAddition",
+            "RekeyAfterTime", "RekeyTimeout", "RejectAfterTime",
+            "KeepaliveTimeout", "MaxHandshakeAttempts",
+            "RandomTrailers", "DisableCookies"
+        ]
+        json_awg_params = {}
+        for k in keys_order:
+            if k in awg_params and awg_params[k] is not None and str(awg_params[k]).strip() != "":
+                json_awg_params[k] = str(awg_params[k])
+
         awg_last_config = {
-            "H1": str(awg_params.get("H1", 1)),
-            "H2": str(awg_params.get("H2", 2)),
-            "H3": str(awg_params.get("H3", 3)),
-            "H4": str(awg_params.get("H4", 4)),
-            "Jc": str(awg_params.get("Jc", 3)),
-            "Jmin": str(awg_params.get("Jmin", 40)),
-            "Jmax": str(awg_params.get("Jmax", 70)),
-            "S1": str(awg_params.get("S1", 15)),
-            "S2": str(awg_params.get("S2", 57)),
+            **json_awg_params,
+            "allowed_ips": ["0.0.0.0/0", "::/0"],
+            "clientId": client_pubkey,
             "client_ip": client_ip,
             "client_priv_key": client_privkey,
             "client_pub_key": client_pubkey,
             "config": native_conf,
             "hostName": host,
-            "port": str(port),
+            "mtu": "1376",
+            "persistent_keep_alive": 25,
+            "port": int(port),
             "server_pub_key": server_pubkey,
+            "transport_proto": "udp"
+        }
+        if preshared_key and preshared_key.strip():
+            awg_last_config["psk_key"] = preshared_key.strip()
+
+        # Protocol version: "3.1" if v3 params exist, else "2"
+        has_v3 = any(k in awg_params for k in ["HeaderProtectionKey", "RekeyAfterTime", "RandomTrailers", "DisableCookies"])
+        protocol_version = "3.1" if has_v3 else "2"
+
+        awg_block = {
+            **json_awg_params,
+            "protocol_version": protocol_version,
+            "last_config": json.dumps(awg_last_config, ensure_ascii=False),
+            "port": str(port),
             "transport_proto": "udp"
         }
 
         profile = {
             "containers": [
                 {
-                    "container": "amnezia-awg",
-                    "awg": {
-                        "last_config": json.dumps(awg_last_config, ensure_ascii=False),
-                        "port": str(port),
-                        "transport_proto": "udp",
-                        **awg_last_config
-                    }
+                    "container": target_container,
+                    "awg": awg_block,
+                    "awg2": awg_block
                 }
             ],
-            "defaultContainer": "amnezia-awg",
+            "defaultContainer": target_container,
             "description": client_name,
             "dns1": dns1,
             "dns2": dns2,
@@ -153,9 +213,7 @@ class AWGService:
         }
 
         json_str = json.dumps(profile, indent=2, ensure_ascii=False)
-        # vpn:// link format used by Amnezia
-        b64_json = base64.b64encode(json.dumps(profile).encode("utf-8")).decode("utf-8")
-        vpn_uri = f"vpn://{b64_json}"
+        vpn_uri = AWGService.encode_vpn_uri(profile)
 
         return json_str, vpn_uri
 

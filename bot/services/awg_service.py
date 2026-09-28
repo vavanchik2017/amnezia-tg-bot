@@ -39,7 +39,7 @@ class AWGService:
         """Finds next available IP address in the subnet."""
         cidr = subnet_cidr or settings.client_ip_subnet
         network = ipaddress.ip_network(cidr, strict=False)
-        used = set(existing_ips)
+        used = set(ip.split("/")[0].strip() for ip in existing_ips if ip)
 
         # Skip .0 (network) and .1 (usual server gateway)
         for host in network.hosts():
@@ -72,8 +72,9 @@ class AWGService:
             f"DNS = {dns_str}"
         ]
 
-        # Standard AWG parameters strictly supported by AmneziaWG apps
-        keys_order = ["Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4"]
+        # Standard AWG parameters strictly supported by standalone AmneziaWG apps.
+        # S3 and S4 must NOT be included in .conf as they trigger 'Unknown attribute in Interface' in clients.
+        keys_order = ["Jc", "Jmin", "Jmax", "S1", "S2", "H1", "H2", "H3", "H4"]
         defaults = {
             "Jc": 3, "Jmin": 40, "Jmax": 70, "S1": 15, "S2": 57,
             "H1": 1, "H2": 2, "H3": 3, "H4": 4
@@ -181,14 +182,22 @@ class AWGService:
             "transport_proto": "udp"
         }
 
+        # For amnezia-awg2 container, specify 'awg2' block only.
+        # If 'awg' is present, the Amnezia VPN app labels it as 'Amnezia Legacy (версия 2)'.
+        # Setting 'awg2' causes Amnezia VPN to correctly recognize it as modern AmneziaWG (without Legacy).
+        if target_container == "amnezia-awg2":
+            container_obj = {
+                "container": target_container,
+                "awg2": awg_block
+            }
+        else:
+            container_obj = {
+                "container": target_container,
+                "awg": awg_block
+            }
+
         profile = {
-            "containers": [
-                {
-                    "container": target_container,
-                    "awg": awg_block,
-                    "awg2": awg_block
-                }
-            ],
+            "containers": [container_obj],
             "defaultContainer": target_container,
             "description": client_name,
             "dns1": dns1,

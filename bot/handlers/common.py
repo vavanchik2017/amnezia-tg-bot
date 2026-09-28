@@ -28,12 +28,18 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def get_peer_keyboard(peer_id: int, is_active: bool) -> InlineKeyboardMarkup:
+def get_peer_keyboard(peer_id: int, is_active: bool, has_subnet_mismatch: bool = False) -> InlineKeyboardMarkup:
     toggle_text = "⏸ Отключить" if is_active else "▶️ Включить"
     buttons = [
         [
             InlineKeyboardButton(text="📥 Получить конфиги / QR", callback_data=f"download_choice:{peer_id}")
-        ],
+        ]
+    ]
+    if has_subnet_mismatch:
+        buttons.append([
+            InlineKeyboardButton(text="🔄 Исправить подсеть IP", callback_data=f"fix_peer_subnet:{peer_id}")
+        ])
+    buttons.extend([
         [
             InlineKeyboardButton(text="✏️ Переименовать", callback_data=f"rename_peer:{peer_id}"),
             InlineKeyboardButton(text=toggle_text, callback_data=f"toggle_peer:{peer_id}")
@@ -45,7 +51,7 @@ def get_peer_keyboard(peer_id: int, is_active: bool) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(text="⬅️ Назад к списку", callback_data="list_peers:0")
         ]
-    ]
+    ])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 

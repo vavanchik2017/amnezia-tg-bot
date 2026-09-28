@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import ipaddress
 import json
 import logging
 import re
@@ -18,6 +19,7 @@ class DockerService:
         self._client = None
         self._cached_server_info: Optional[Dict[str, Any]] = None
         self._cached_psk: Optional[str] = None
+        self._cached_subnet: Optional[str] = None
         self._config_file_path: Optional[str] = None
         self._wg_bin = "wg"
 
@@ -436,6 +438,67 @@ class DockerService:
             logger.warning(f"Could not inspect container port mappings: {e}")
         return internal_port
 
+    async def get_server_subnet(self) -> str:
+        """Determines the active subnet (e.g. 10.8.1.0/24) used by the VPN container."""
+        if self._cached_subnet:
+            return self._cached_subnet
+
+        # 1. Try reading Address from awg0.conf / wg0.conf
+        try:
+            iface_info, _ = await self.get_wg_dump()
+            iface = iface_info["interface"] if iface_info else (settings.wg_interface or "awg0")
+            config_path = await self.find_config_file(iface)
+            if config_path:
+                code, out = await self.exec_cmd(f"grep -i -E '^[[:space:]]*Address' {config_path} 2>/dev/null")
+                if code == 0 and out.strip():
+                    for part in out.split("=", 1)[1].split(","):
+                        clean_addr = part.strip()
+                        if "/" in clean_addr and ":" not in clean_addr:
+                            net = ipaddress.ip_network(clean_addr, strict=False)
+                            self._cached_subnet = str(net)
+                            logger.info(f"Detected server subnet from config Address '{clean_addr}': {self._cached_subnet}")
+                            return self._cached_subnet
+        except Exception as e:
+            logger.warning(f"Could not read subnet from config Address: {e}")
+
+        # 2. Try 'ip -4 -o addr show <iface>' inside container
+        try:
+            iface = settings.wg_interface or "awg0"
+            code, out = await self.exec_cmd(f"ip -4 -o addr show {iface} 2>/dev/null || ip -4 -o addr show awg0 2>/dev/null")
+            if code == 0 and out.strip():
+                match = re.search(r'inet\s+(\d+\.\d+\.\d+\.\d+/\d+)', out)
+                if match:
+                    cidr = match.group(1)
+                    net = ipaddress.ip_network(cidr, strict=False)
+                    self._cached_subnet = str(net)
+                    logger.info(f"Detected server subnet from ip addr '{cidr}': {self._cached_subnet}")
+                    return self._cached_subnet
+        except Exception as e:
+            logger.warning(f"Could not read subnet from ip addr: {e}")
+
+        # 3. Try inspecting existing peers in wg dump
+        try:
+            _, peers = await self.get_wg_dump()
+            for p in peers:
+                ips = p.get("allowed_ips", "")
+                for ip_item in ips.split(","):
+                    ip_item = ip_item.strip()
+                    if "/" in ip_item and ":" not in ip_item:
+                        ip_clean = ip_item.split("/")[0]
+                        octets = ip_clean.split(".")
+                        if len(octets) == 4 and octets[0] == "10":
+                            inferred = f"{octets[0]}.{octets[1]}.{octets[2]}.0/24"
+                            self._cached_subnet = inferred
+                            logger.info(f"Inferred server subnet from active peer IP '{ip_item}': {self._cached_subnet}")
+                            return self._cached_subnet
+        except Exception as e:
+            logger.warning(f"Could not infer subnet from existing peers: {e}")
+
+        # 4. Fallback to settings or default
+        fallback = settings.client_ip_subnet or "10.8.1.0/24"
+        self._cached_subnet = fallback
+        return fallback
+
     async def get_server_info(self) -> Dict[str, Any]:
         """Collects all server parameters needed to issue client configs."""
         if self._cached_server_info and self._cached_server_info.get("public_key") and self._cached_server_info.get("host") != "127.0.0.1":
@@ -466,6 +529,7 @@ class DockerService:
 
         # Server-wide PSK if Amnezia uses one
         psk = await self.get_preshared_key()
+        server_subnet = await self.get_server_subnet()
 
         info = {
             "interface": iface_name,
@@ -473,7 +537,8 @@ class DockerService:
             "public_key": public_key,
             "host": public_ip,
             "awg_params": awg_params,
-            "preshared_key": psk
+            "preshared_key": psk,
+            "subnet": server_subnet
         }
         self._cached_server_info = info
         return info
@@ -1076,6 +1141,53 @@ class DockerService:
         if code != 0:
             logger.error(f"Failed to re-enable peer: {out}")
             raise RuntimeError(f"Failed to re-enable peer: {out}")
+
+    async def update_peer_ip_runtime(self, public_key: str, old_ip: str, new_ip: str):
+        """Updates peer IP address in WireGuard runtime, config file, and clientsTable."""
+        clean_old_ip = old_ip.split("/")[0].strip()
+        clean_new_ip = new_ip.split("/")[0].strip()
+        server_info = await self.get_server_info()
+        iface = server_info["interface"]
+        logger.info(f"Updating IP for peer {public_key[:12]}... on interface {iface}: {clean_old_ip} -> {clean_new_ip}")
+
+        # 1. Update live WireGuard runtime
+        cmd = f"{self._wg_bin} set {iface} peer {public_key} allowed-ips {clean_new_ip}/32"
+        code, out = await self.exec_cmd(cmd)
+        if code != 0:
+            logger.error(f"Failed to update peer IP in WireGuard runtime: {out}")
+            raise RuntimeError(f"WireGuard update failed: {out}")
+
+        # 2. Update server config file if exists
+        config_path = await self.find_config_file(iface)
+        if config_path:
+            await self.backup_config_file(config_path)
+            escaped_old = re.escape(clean_old_ip)
+            sed_cmd = f"sed -i 's/{escaped_old}\\/32/{clean_new_ip}\\/32/g' {config_path} 2>/dev/null"
+            await self.exec_cmd(sed_cmd)
+            logger.info(f"Updated IP in {config_path} to {clean_new_ip}")
+
+        # 3. Update Amnezia clientsTable if exists
+        try:
+            path = await self.get_amnezia_clients_table_path()
+            if path:
+                code, content = await self.exec_cmd(f"cat {path}")
+                if code == 0 and content.strip():
+                    table = json.loads(content)
+                    changed = False
+                    items = table if isinstance(table, list) else (table.get("clients", []) if isinstance(table, dict) and "clients" in table else table.values())
+                    for c in items:
+                        if isinstance(c, dict) and (c.get("clientId") == public_key or c.get("client_pub_key") == public_key or c.get("publicKey") == public_key):
+                            if isinstance(c.get("userData"), dict):
+                                c["userData"]["allowedIps"] = f"{clean_new_ip}/32"
+                                c["userData"]["allowed_ips"] = f"{clean_new_ip}/32"
+                                changed = True
+                    if changed:
+                        await self.backup_config_file(path)
+                        b64_str = base64.b64encode(json.dumps(table, indent=2, ensure_ascii=False).encode("utf-8")).decode("ascii")
+                        await self.exec_cmd(f"echo '{b64_str}' | base64 -d > {path}")
+                        logger.info(f"Updated IP in {path} to {clean_new_ip}")
+        except Exception as e:
+            logger.warning(f"Could not update IP in clientsTable: {e}")
 
 
 docker_service = DockerService()

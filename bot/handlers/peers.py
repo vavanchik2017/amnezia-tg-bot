@@ -1,4 +1,5 @@
 import html
+import ipaddress
 import re
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
@@ -88,12 +89,22 @@ async def process_create_peer_name(message: Message, state: FSMContext):
     wait_msg = await message.answer("⏳ Генерируем ключи и настраиваем VPN...")
 
     try:
-        # Получаем данные сервера
+        # Получаем данные сервера и актуальную подсеть
         server_info = await docker_service.get_server_info()
+        server_subnet = server_info.get("subnet") or await docker_service.get_server_subnet()
 
-        # Выделяем следующий свободный IP
+        # Выделяем следующий свободный IP в правильной подсети
         allocated_ips = await models.get_allocated_ips()
-        client_ip = awg_service.allocate_next_ip(allocated_ips)
+        try:
+            _, live_peers = await docker_service.get_wg_dump()
+            for lp in live_peers:
+                lp_ip = lp.get("allowed_ips", "").split("/")[0].strip()
+                if lp_ip and lp_ip not in allocated_ips:
+                    allocated_ips.append(lp_ip)
+        except Exception:
+            pass
+
+        client_ip = awg_service.allocate_next_ip(allocated_ips, subnet_cidr=server_subnet)
 
         # Генерируем пару ключей
         client_priv, client_pub = awg_service.generate_keypair()
@@ -543,6 +554,23 @@ async def cb_view_peer(callback: CallbackQuery):
     last_tx = peer.get("last_tx", 0)
     traffic_str = f"📥 {awg_service.format_bytes(last_rx)} / 📤 {awg_service.format_bytes(last_tx)}"
 
+    # Проверяем совпадение подсети пира с подсетью сервера
+    has_subnet_mismatch = False
+    subnet_warning = ""
+    try:
+        server_subnet = await docker_service.get_server_subnet()
+        peer_ip = peer['ip_address'].split("/")[0].strip()
+        net = ipaddress.ip_network(server_subnet, strict=False)
+        if ipaddress.ip_address(peer_ip) not in net:
+            has_subnet_mismatch = True
+            subnet_warning = (
+                f"\n\n⚠️ <b>Внимание: Несоответствие подсети!</b>\n"
+                f"IP конфига (<code>{peer_ip}</code>) не входит в подсеть сервера (<code>{server_subnet}</code>). "
+                f"Трафик с сервера сбрасывается фаерволом. Нажмите кнопку <b>«🔄 Исправить подсеть IP»</b> ниже."
+            )
+    except Exception:
+        pass
+
     text = (
         f"👤 <b>Карточка конфига: «{html.escape(peer['name'])}»</b>\n\n"
         f"• <b>Статус:</b> {status_str}\n"
@@ -550,16 +578,57 @@ async def cb_view_peer(callback: CallbackQuery):
         f"• <b>Последнее подключение:</b> {hs_str}\n"
         f"• <b>Текущий счетчик WG:</b> {traffic_str}\n"
         f"• <b>Дата создания:</b> <code>{peer['created_at']}</code>\n"
-        f"• <b>Публичный ключ:</b>\n<code>{peer['public_key']}</code>\n"
+        f"• <b>Публичный ключ:</b>\n<code>{peer['public_key']}</code>"
+        f"{subnet_warning}\n"
     )
 
     await safe_edit_message(
         callback,
         text,
-        reply_markup=get_peer_keyboard(peer_id, is_active),
+        reply_markup=get_peer_keyboard(peer_id, is_active, has_subnet_mismatch=has_subnet_mismatch),
         parse_mode="HTML"
     )
     await callback.answer()
+
+
+# --- Исправление подсети IP ---
+
+@peers_router.callback_query(IsAdminFilter(), F.data.startswith("fix_peer_subnet:"))
+async def cb_fix_peer_subnet(callback: CallbackQuery):
+    peer_id = int(callback.data.split(":")[1])
+    peer = await models.get_peer_by_id(peer_id)
+    if not peer:
+        await callback.answer("Конфиг не найден", show_alert=True)
+        return
+
+    try:
+        server_subnet = await docker_service.get_server_subnet()
+        allocated_ips = await models.get_allocated_ips()
+        try:
+            _, live_peers = await docker_service.get_wg_dump()
+            for lp in live_peers:
+                lp_ip = lp.get("allowed_ips", "").split("/")[0].strip()
+                if lp_ip and lp_ip not in allocated_ips:
+                    allocated_ips.append(lp_ip)
+        except Exception:
+            pass
+
+        old_ip = peer["ip_address"]
+        new_ip = awg_service.allocate_next_ip(allocated_ips, subnet_cidr=server_subnet)
+
+        # 1. Update WireGuard runtime and configs
+        await docker_service.update_peer_ip_runtime(peer["public_key"], old_ip, new_ip)
+
+        # 2. Update DB
+        await models.update_peer_info(peer_id=peer_id, ip_address=new_ip)
+
+        await callback.answer(f"✅ IP обновлен: {new_ip}! Заново скачайте конфиг.", show_alert=True)
+    except Exception as e:
+        await callback.answer(f"❌ Ошибка обновления IP: {e}", show_alert=True)
+        return
+
+    # Refresh card
+    await cb_view_peer(callback)
 
 
 # --- Отключение / Включение пира ---

@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     server_host: str = ""
     server_port: int = 0
     wg_interface: str = ""
-    client_ip_subnet: str = "10.8.0.0/24"
+    client_ip_subnet: str = "10.8.1.0/24"
     client_dns: str = "1.1.1.1, 1.0.0.1"
     stats_poll_interval: int = 300
     db_path: str = "/app/data/bot.db"

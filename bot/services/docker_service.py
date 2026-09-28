@@ -109,49 +109,85 @@ class DockerService:
         if not lines:
             return None, []
 
-        interface_info = None
+        # The first line of WireGuard/AmneziaWG dump is ALWAYS the interface definition
+        first_line = lines[0]
+        parts = [p.strip() for p in first_line.split("\t") if p.strip()]
+        if len(parts) < 3:
+            parts = first_line.split()
+
+        if len(parts) < 3:
+            self._last_error = f"Некорректная первая строка дампа: {first_line[:50]}"
+            logger.error(self._last_error)
+            return None, []
+
+        # Check if first column is interface name or base64 key
+        if len(parts[0]) == 44 and parts[0].endswith("="):
+            # Format: <privkey> <pubkey> <port> [<fwmark>] [<awg_params...>]
+            iface = settings.wg_interface or "awg0"
+            privkey = parts[0]
+            pubkey = parts[1]
+            port = int(parts[2]) if parts[2].isdigit() else parts[2]
+            fwmark = parts[3] if len(parts) > 3 else "off"
+        else:
+            # Format: <iface> <privkey> <pubkey> <port> [<fwmark>] [<awg_params...>]
+            iface = parts[0]
+            privkey = parts[1]
+            pubkey = parts[2]
+            port = int(parts[3]) if parts[3].isdigit() else parts[3]
+            fwmark = parts[4] if len(parts) > 4 else "off"
+
+        interface_info = {
+            "interface": iface,
+            "private_key": privkey,
+            "public_key": pubkey,
+            "listen_port": port,
+            "fwmark": fwmark
+        }
+
+        # Subsequent lines are peers
         peers = []
+        for line in lines[1:]:
+            p_parts = [p.strip() for p in line.split("\t") if p.strip()]
+            if len(p_parts) < 4:
+                p_parts = line.split()
 
-        for line in lines:
-            # Handle both tab-separated and multiple space separated outputs
-            parts = [p.strip() for p in line.split("\t") if p.strip()]
-            if len(parts) < 4:
-                parts = line.split()
+            # Skip secondary interface lines if any
+            if len(p_parts) >= 2 and len(p_parts[1]) == 44 and p_parts[1].endswith("=") and len(p_parts) < 8:
+                continue
 
-            if 4 <= len(parts) <= 5 and interface_info is None:
-                # Interface line
-                if len(parts) == 5 or not parts[0].endswith("="):
-                    iface = parts[0]
-                    privkey = parts[1]
-                    pubkey = parts[2]
-                    port = int(parts[3]) if parts[3].isdigit() else parts[3]
-                    fwmark = parts[4] if len(parts) > 4 else "off"
+            if len(p_parts) >= 6:
+                has_iface_col = len(p_parts) >= 8 and not (len(p_parts[0]) == 44 and p_parts[0].endswith("="))
+                if has_iface_col:
+                    p_iface = p_parts[0]
+                    p_pubkey = p_parts[1]
+                    p_psk = p_parts[2]
+                    p_endpoint = p_parts[3]
+                    p_ips = p_parts[4]
+                    p_hs = int(p_parts[5]) if len(p_parts) > 5 and p_parts[5].isdigit() else 0
+                    p_rx = int(p_parts[6]) if len(p_parts) > 6 and p_parts[6].isdigit() else 0
+                    p_tx = int(p_parts[7]) if len(p_parts) > 7 and p_parts[7].isdigit() else 0
+                    p_keepalive = int(p_parts[8]) if len(p_parts) > 8 and p_parts[8].isdigit() else 0
                 else:
-                    iface = settings.wg_interface or "awg0"
-                    privkey = parts[0]
-                    pubkey = parts[1]
-                    port = int(parts[2]) if parts[2].isdigit() else parts[2]
-                    fwmark = parts[3] if len(parts) > 3 else "off"
+                    p_iface = iface
+                    p_pubkey = p_parts[0]
+                    p_psk = p_parts[1]
+                    p_endpoint = p_parts[2]
+                    p_ips = p_parts[3]
+                    p_hs = int(p_parts[4]) if len(p_parts) > 4 and p_parts[4].isdigit() else 0
+                    p_rx = int(p_parts[5]) if len(p_parts) > 5 and p_parts[5].isdigit() else 0
+                    p_tx = int(p_parts[6]) if len(p_parts) > 6 and p_parts[6].isdigit() else 0
+                    p_keepalive = int(p_parts[7]) if len(p_parts) > 7 and p_parts[7].isdigit() else 0
 
-                interface_info = {
-                    "interface": iface,
-                    "private_key": privkey,
-                    "public_key": pubkey,
-                    "listen_port": port,
-                    "fwmark": fwmark
-                }
-            elif len(parts) >= 8:
-                # Peer line: <iface> <pubkey> <preshared_key> <endpoint> <allowed_ips> <latest_handshake> <rx_bytes> <tx_bytes> [<persistent_keepalive>]
                 peer = {
-                    "interface": parts[0],
-                    "public_key": parts[1],
-                    "preshared_key": parts[2],
-                    "endpoint": parts[3],
-                    "allowed_ips": parts[4],
-                    "latest_handshake": int(parts[5]) if parts[5].isdigit() else 0,
-                    "rx_bytes": int(parts[6]) if parts[6].isdigit() else 0,
-                    "tx_bytes": int(parts[7]) if parts[7].isdigit() else 0,
-                    "persistent_keepalive": int(parts[8]) if len(parts) > 8 and parts[8].isdigit() else 0
+                    "interface": p_iface,
+                    "public_key": p_pubkey,
+                    "preshared_key": p_psk,
+                    "endpoint": p_endpoint,
+                    "allowed_ips": p_ips,
+                    "latest_handshake": p_hs,
+                    "rx_bytes": p_rx,
+                    "tx_bytes": p_tx,
+                    "persistent_keepalive": p_keepalive
                 }
                 peers.append(peer)
 

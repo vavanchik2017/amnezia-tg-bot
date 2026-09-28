@@ -87,20 +87,46 @@ async def delete_peer(peer_id: int) -> bool:
     return False
 
 
-async def import_external_peer(name: str, public_key: str, ip_address: str) -> int:
+async def import_external_peer(name: str, public_key: str, ip_address: str, private_key: str = "") -> int:
     db = await get_db()
     cursor = await db.execute(
         """
         INSERT INTO peers (name, public_key, private_key, ip_address, is_active)
-        VALUES (?, ?, '', ?, 1)
+        VALUES (?, ?, ?, ?, 1)
         ON CONFLICT(public_key) DO UPDATE SET
+            name = CASE WHEN excluded.name NOT LIKE 'Client-%' THEN excluded.name ELSE peers.name END,
+            private_key = CASE WHEN excluded.private_key != '' THEN excluded.private_key ELSE peers.private_key END,
             ip_address = excluded.ip_address,
             is_active = 1
         """,
-        (name, public_key, ip_address)
+        (name, public_key, private_key, ip_address)
     )
     await db.commit()
     return cursor.lastrowid
+
+
+async def update_peer_info(
+    peer_id: int,
+    name: Optional[str] = None,
+    private_key: Optional[str] = None,
+    ip_address: Optional[str] = None
+):
+    db = await get_db()
+    updates = []
+    params = []
+    if name:
+        updates.append("name = ?")
+        params.append(name)
+    if private_key:
+        updates.append("private_key = ?")
+        params.append(private_key)
+    if ip_address:
+        updates.append("ip_address = ?")
+        params.append(ip_address)
+    if updates:
+        params.append(peer_id)
+        await db.execute(f"UPDATE peers SET {', '.join(updates)} WHERE id = ?", tuple(params))
+        await db.commit()
 
 
 async def get_allocated_ips() -> List[str]:

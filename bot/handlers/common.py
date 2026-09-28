@@ -35,11 +35,12 @@ def get_peer_keyboard(peer_id: int, is_active: bool) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📥 Получить конфиги / QR", callback_data=f"download_choice:{peer_id}")
         ],
         [
-            InlineKeyboardButton(text=toggle_text, callback_data=f"toggle_peer:{peer_id}"),
-            InlineKeyboardButton(text="📈 Статистика", callback_data=f"peer_stats:{peer_id}")
+            InlineKeyboardButton(text="✏️ Переименовать", callback_data=f"rename_peer:{peer_id}"),
+            InlineKeyboardButton(text=toggle_text, callback_data=f"toggle_peer:{peer_id}")
         ],
         [
-            InlineKeyboardButton(text="🗑 Отозвать (Удалить)", callback_data=f"delete_confirm:{peer_id}")
+            InlineKeyboardButton(text="📈 Статистика", callback_data=f"peer_stats:{peer_id}"),
+            InlineKeyboardButton(text="🗑 Отозвать", callback_data=f"delete_confirm:{peer_id}")
         ],
         [
             InlineKeyboardButton(text="⬅️ Назад к списку", callback_data="list_peers:0")

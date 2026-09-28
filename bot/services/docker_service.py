@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import json
 import logging
 import re
 import urllib.request
@@ -394,35 +396,328 @@ class DockerService:
             logger.warning(f"Could not parse peer names from config: {e}")
         return names
 
-    async def sync_peers_from_wireguard(self):
-        """Syncs all peers currently present in WireGuard interface into the database."""
+    async def get_amnezia_clients_table_path(self) -> Optional[str]:
+        """Finds the path to Amnezia's clientsTable file inside the container."""
+        candidates = [
+            "/opt/amnezia/awg/clientsTable",
+            "/opt/amnezia/awg/clientsTable.json",
+            "/opt/amnezia/clientsTable",
+            "/opt/amnezia/wireguard/clientsTable",
+            "/etc/amnezia/awg/clientsTable"
+        ]
+        for path in candidates:
+            code, _ = await self.exec_cmd(f"test -f {path}")
+            if code == 0:
+                return path
+
+        code, out = await self.exec_cmd("find /opt /etc -maxdepth 4 -name '*clientsTable*' 2>/dev/null")
+        if code == 0 and out.strip():
+            found = out.strip().splitlines()[0].strip()
+            if found:
+                return found
+        return None
+
+    async def read_amnezia_clients_table(self) -> List[Dict[str, Any]]:
+        """
+        Parses client records from Amnezia's clientsTable file inside container.
+        Returns a list of dicts with: name, public_key, private_key, ip.
+        """
+        path = await self.get_amnezia_clients_table_path()
+        if not path:
+            logger.info("Amnezia clientsTable not found in container.")
+            return []
+
+        code, content = await self.exec_cmd(f"cat {path}")
+        if code != 0 or not content.strip():
+            logger.warning(f"Could not read {path} or file is empty.")
+            return []
+
         try:
-            _, wg_peers = await self.get_wg_dump()
-            if not wg_peers:
+            raw_data = json.loads(content)
+        except Exception as e:
+            logger.warning(f"JSON decode failed for {path}: {e}")
+            return []
+
+        items = []
+        if isinstance(raw_data, list):
+            items = raw_data
+        elif isinstance(raw_data, dict):
+            if "clients" in raw_data and isinstance(raw_data["clients"], list):
+                items = raw_data["clients"]
+            elif "clients" in raw_data and isinstance(raw_data["clients"], dict):
+                items = list(raw_data["clients"].values())
+            else:
+                items = list(raw_data.values())
+
+        results = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+
+            name = (
+                item.get("clientName") or
+                item.get("client_name") or
+                item.get("name") or
+                item.get("userData") or
+                item.get("user_data") or
+                item.get("comment") or
+                item.get("description")
+            )
+            pubkey = (
+                item.get("client_pub_key") or
+                item.get("clientPubKey") or
+                item.get("client_public_key") or
+                item.get("clientPublicKey") or
+                item.get("publicKey") or
+                item.get("public_key") or
+                item.get("pub_key") or
+                item.get("pubkey") or
+                item.get("pubKey")
+            )
+            privkey = (
+                item.get("client_priv_key") or
+                item.get("clientPrivKey") or
+                item.get("client_private_key") or
+                item.get("clientPrivateKey") or
+                item.get("privateKey") or
+                item.get("private_key") or
+                item.get("priv_key") or
+                item.get("privkey") or
+                item.get("privKey")
+            )
+            ip = (
+                item.get("client_ip") or
+                item.get("clientIp") or
+                item.get("ip") or
+                item.get("ip_address") or
+                item.get("address")
+            )
+
+            name_str = str(name).strip() if name is not None else ""
+            pubkey_str = str(pubkey).strip() if pubkey else ""
+            privkey_str = str(privkey).strip() if privkey else ""
+            ip_str = str(ip).strip() if ip else ""
+            if "/" in ip_str:
+                ip_str = ip_str.split("/")[0].strip()
+
+            if pubkey_str or ip_str or name_str:
+                results.append({
+                    "name": name_str,
+                    "public_key": pubkey_str,
+                    "private_key": privkey_str,
+                    "ip": ip_str
+                })
+
+        logger.info(f"Loaded {len(results)} client records from Amnezia clientsTable ({path})")
+        return results
+
+    async def save_peer_to_amnezia_table(self, name: str, public_key: str, private_key: str, ip_address: str):
+        """Appends newly created client to Amnezia's clientsTable if the file exists."""
+        try:
+            path = await self.get_amnezia_clients_table_path()
+            if not path:
                 return
 
-            config_names = await self.parse_peer_names_from_config()
+            code, content = await self.exec_cmd(f"cat {path}")
+            if code != 0 or not content.strip():
+                return
 
-            for p in wg_peers:
-                pubkey = p.get("public_key")
-                if not pubkey:
+            table = json.loads(content)
+            new_client = {
+                "clientId": len(table) if isinstance(table, list) else len(table.keys()),
+                "clientName": name,
+                "client_ip": ip_address,
+                "client_priv_key": private_key,
+                "client_pub_key": public_key,
+                "userData": name
+            }
+
+            if isinstance(table, list):
+                if not any(isinstance(c, dict) and (c.get("client_pub_key") == public_key or c.get("publicKey") == public_key) for c in table):
+                    table.append(new_client)
+            elif isinstance(table, dict):
+                if "clients" in table and isinstance(table["clients"], list):
+                    table["clients"].append(new_client)
+                else:
+                    table[str(new_client["clientId"])] = new_client
+
+            await self.backup_config_file(path)
+            new_json = json.dumps(table, indent=2, ensure_ascii=False)
+            b64_str = base64.b64encode(new_json.encode("utf-8")).decode("ascii")
+            write_cmd = f"echo '{b64_str}' | base64 -d > {path}"
+            w_code, w_out = await self.exec_cmd(write_cmd)
+            if w_code == 0:
+                logger.info(f"Appended client '{name}' to {path}")
+            else:
+                logger.warning(f"Failed to write to {path}: {w_out}")
+        except Exception as e:
+            logger.warning(f"Could not update Amnezia clientsTable: {e}")
+
+    async def remove_peer_from_amnezia_table(self, public_key: str):
+        """Removes client from Amnezia's clientsTable if the file exists."""
+        try:
+            path = await self.get_amnezia_clients_table_path()
+            if not path:
+                return
+
+            code, content = await self.exec_cmd(f"cat {path}")
+            if code != 0 or not content.strip():
+                return
+
+            table = json.loads(content)
+            changed = False
+
+            if isinstance(table, list):
+                new_list = [c for c in table if not (isinstance(c, dict) and (c.get("client_pub_key") == public_key or c.get("publicKey") == public_key))]
+                if len(new_list) != len(table):
+                    table = new_list
+                    changed = True
+            elif isinstance(table, dict):
+                if "clients" in table and isinstance(table["clients"], list):
+                    new_list = [c for c in table["clients"] if not (isinstance(c, dict) and (c.get("client_pub_key") == public_key or c.get("publicKey") == public_key))]
+                    if len(new_list) != len(table["clients"]):
+                        table["clients"] = new_list
+                        changed = True
+
+            if changed:
+                await self.backup_config_file(path)
+                b64_str = base64.b64encode(json.dumps(table, indent=2, ensure_ascii=False).encode("utf-8")).decode("ascii")
+                await self.exec_cmd(f"echo '{b64_str}' | base64 -d > {path}")
+                logger.info(f"Removed client {public_key[:12]} from {path}")
+        except Exception as e:
+            logger.warning(f"Could not remove from Amnezia clientsTable: {e}")
+
+    async def rename_peer_in_amnezia_table(self, public_key: str, new_name: str):
+        """Updates client name in Amnezia's clientsTable."""
+        try:
+            path = await self.get_amnezia_clients_table_path()
+            if not path:
+                return
+
+            code, content = await self.exec_cmd(f"cat {path}")
+            if code != 0 or not content.strip():
+                return
+
+            table = json.loads(content)
+            changed = False
+
+            items = table if isinstance(table, list) else (table.get("clients", []) if isinstance(table, dict) and "clients" in table else table.values())
+            for c in items:
+                if isinstance(c, dict) and (c.get("client_pub_key") == public_key or c.get("publicKey") == public_key):
+                    for key in ["clientName", "client_name", "name", "userData"]:
+                        if key in c:
+                            c[key] = new_name
+                    if not any(k in c for k in ["clientName", "client_name", "name"]):
+                        c["clientName"] = new_name
+                    changed = True
+
+            if changed:
+                await self.backup_config_file(path)
+                b64_str = base64.b64encode(json.dumps(table, indent=2, ensure_ascii=False).encode("utf-8")).decode("ascii")
+                await self.exec_cmd(f"echo '{b64_str}' | base64 -d > {path}")
+                logger.info(f"Renamed client {public_key[:12]} to '{new_name}' in {path}")
+        except Exception as e:
+            logger.warning(f"Could not rename in Amnezia clientsTable: {e}")
+
+    async def sync_peers_from_wireguard(self):
+        """Syncs all peers currently present in WireGuard interface into the database,
+        enriching them with names and private keys from Amnezia's clientsTable or wg0.conf."""
+        try:
+            _, wg_peers = await self.get_wg_dump()
+            amnezia_clients = await self.read_amnezia_clients_table()
+
+            # Index Amnezia clients
+            table_by_pubkey = {}
+            table_by_ip = {}
+            for c in amnezia_clients:
+                if c.get("public_key"):
+                    table_by_pubkey[c["public_key"]] = c
+                if c.get("ip"):
+                    table_by_ip[c["ip"]] = c
+
+            config_names = await self.parse_peer_names_from_config()
+            synced_pubkeys = set()
+
+            if wg_peers:
+                for p in wg_peers:
+                    pubkey = p.get("public_key")
+                    if not pubkey:
+                        continue
+                    synced_pubkeys.add(pubkey)
+
+                    raw_ips = p.get("allowed_ips", "")
+                    ip = raw_ips.split("/")[0].strip() if "/" in raw_ips else (raw_ips.strip() or "10.8.0.x")
+
+                    # Look up in Amnezia clientsTable first
+                    c_info = table_by_pubkey.get(pubkey) or table_by_ip.get(ip) or {}
+                    c_name = c_info.get("name")
+                    c_priv = c_info.get("private_key") or ""
+
+                    # Fallback to comment in wg0.conf
+                    if not c_name:
+                        c_name = config_names.get(pubkey)
+
+                    existing = await models.get_peer_by_pubkey(pubkey)
+                    if existing:
+                        updates = {}
+                        current_db_name = existing.get("name", "")
+                        if c_name and (current_db_name.startswith("Client-") or current_db_name != c_name):
+                            updates["name"] = c_name
+                        if c_priv and not existing.get("private_key"):
+                            updates["private_key"] = c_priv
+                        if ip and existing.get("ip_address") != ip:
+                            updates["ip_address"] = ip
+
+                        if updates:
+                            await models.update_peer_info(
+                                peer_id=existing["id"],
+                                name=updates.get("name"),
+                                private_key=updates.get("private_key"),
+                                ip_address=updates.get("ip_address")
+                            )
+                            logger.info(f"Updated peer #{existing['id']} with clientsTable info: {updates}")
+                    else:
+                        name = c_name
+                        if not name:
+                            clean_ip = ip.replace(".", "_")
+                            name = f"Client-{clean_ip}"
+
+                        existing_name = await models.get_peer_by_name(name)
+                        if existing_name:
+                            name = f"{name}-{pubkey[:4]}"
+
+                        await models.import_external_peer(name, pubkey, ip, private_key=c_priv)
+                        logger.info(f"Imported WireGuard peer into database: {name} (IP: {ip}, has_priv: {bool(c_priv)})")
+
+            # Also check clients in clientsTable not seen in wg_dump
+            for c in amnezia_clients:
+                pubkey = c.get("public_key")
+                if not pubkey or pubkey in synced_pubkeys:
                     continue
-                raw_ips = p.get("allowed_ips", "")
-                ip = raw_ips.split("/")[0].strip() if "/" in raw_ips else (raw_ips.strip() or "10.8.0.x")
+                ip = c.get("ip") or "10.8.0.x"
+                name = c.get("name") or f"Client-{ip.replace('.', '_')}"
+                priv = c.get("private_key") or ""
 
                 existing = await models.get_peer_by_pubkey(pubkey)
-                if not existing:
-                    name = config_names.get(pubkey)
-                    if not name:
-                        clean_ip = ip.replace(".", "_")
-                        name = f"Client-{clean_ip}"
-
+                if existing:
+                    updates = {}
+                    if c.get("name") and existing["name"].startswith("Client-"):
+                        updates["name"] = c["name"]
+                    if priv and not existing.get("private_key"):
+                        updates["private_key"] = priv
+                    if updates:
+                        await models.update_peer_info(
+                            peer_id=existing["id"],
+                            name=updates.get("name"),
+                            private_key=updates.get("private_key")
+                        )
+                else:
                     existing_name = await models.get_peer_by_name(name)
                     if existing_name:
                         name = f"{name}-{pubkey[:4]}"
+                    await models.import_external_peer(name, pubkey, ip, private_key=priv)
+                    logger.info(f"Imported clientsTable peer: {name} (IP: {ip})")
 
-                    await models.import_external_peer(name, pubkey, ip)
-                    logger.info(f"Imported WireGuard peer into database: {name} (IP: {ip})")
         except Exception as e:
             logger.error(f"Error during sync_peers_from_wireguard: {e}", exc_info=True)
 
@@ -435,7 +730,7 @@ class DockerService:
         else:
             logger.warning(f"Could not create safety backup for {config_path}")
 
-    async def add_peer_runtime(self, public_key: str, ip_address: str):
+    async def add_peer_runtime(self, public_key: str, ip_address: str, name: Optional[str] = None, private_key: Optional[str] = None):
         """Adds peer to running WireGuard interface safely without resetting existing connections."""
         server_info = await self.get_server_info()
         iface = server_info["interface"]
@@ -450,13 +745,18 @@ class DockerService:
         config_path = await self.find_config_file(iface)
         if config_path:
             await self.backup_config_file(config_path)
-            peer_block = f"\n# Added by AmneziaBot\n[Peer]\nPublicKey = {public_key}\nAllowedIPs = {ip_address}/32\n"
+            comment = f"# {name}" if name else "# Added by AmneziaBot"
+            peer_block = f"\n{comment}\n[Peer]\nPublicKey = {public_key}\nAllowedIPs = {ip_address}/32\n"
             append_cmd = f"printf '{peer_block}' >> {config_path}"
             await self.exec_cmd(append_cmd)
             logger.info(f"Peer {public_key[:12]}... appended to {config_path}")
 
+        # Also append to Amnezia clientsTable if it exists
+        if name and private_key:
+            await self.save_peer_to_amnezia_table(name, public_key, private_key, ip_address)
+
     async def remove_peer_runtime(self, public_key: str):
-        """Removes peer from WireGuard interface and config file safely."""
+        """Removes peer from WireGuard interface, config file, and Amnezia clientsTable safely."""
         server_info = await self.get_server_info()
         iface = server_info["interface"]
         logger.info(f"Removing peer {public_key[:12]}... from interface {iface}")
@@ -470,6 +770,9 @@ class DockerService:
             script = f"sed -i '/PublicKey = {re.escape(public_key)}/{{n;d}}' {config_path} 2>/dev/null; sed -i '/PublicKey = {re.escape(public_key)}/d' {config_path} 2>/dev/null"
             await self.exec_cmd(script)
             logger.info(f"Peer {public_key[:12]}... removed from {config_path}")
+
+        # Also remove from Amnezia clientsTable
+        await self.remove_peer_from_amnezia_table(public_key)
 
     async def disable_peer_runtime(self, public_key: str):
         """Temporarily disconnects peer by removing from running interface."""

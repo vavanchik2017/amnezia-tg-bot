@@ -29,6 +29,10 @@ class CreatePeerState(StatesGroup):
     waiting_for_name = State()
 
 
+class RenamePeerState(StatesGroup):
+    waiting_for_name = State()
+
+
 # --- Создание конфига ---
 
 @peers_router.callback_query(IsAdminFilter(), F.data == "create_peer")
@@ -38,7 +42,7 @@ async def cb_create_peer_start(callback: CallbackQuery, state: FSMContext):
     )
     await callback.message.edit_text(
         "✏️ <b>Введите имя для нового конфига:</b>\n\n"
-        "<i>Используйте латинские буквы, цифры, дефис или подчеркивание (например: <code>phone-alex</code>, <code>laptop</code>, <code>tv_box</code>).</i>",
+        "<i>Например: <code>phone-alex</code>, <code>iPhone Вани</code>, <code>laptop</code>, <code>tv_box</code>.</i>",
         reply_markup=kb,
         parse_mode="HTML"
     )
@@ -60,10 +64,10 @@ async def cb_cancel_create(callback: CallbackQuery, state: FSMContext):
 @peers_router.message(IsAdminFilter(), CreatePeerState.waiting_for_name)
 async def process_create_peer_name(message: Message, state: FSMContext):
     raw_name = message.text.strip()
-    if not re.match(r"^[a-zA-Z0-9_\-]{2,32}$", raw_name):
+    if len(raw_name) < 2 or len(raw_name) > 36 or any(c in raw_name for c in "\n\r\t`$\"';/\\<>|"):
         await message.answer(
             "⚠️ <b>Некорректное имя!</b>\n\n"
-            "Имя должно содержать от 2 до 32 символов (только латиница, цифры, <code>-</code> и <code>_</code>).\n"
+            "Имя должно содержать от 2 до 36 символов и не содержать спецсимволов кавычек и слэшей.\n"
             "Попробуйте еще раз:"
         )
         return
@@ -90,8 +94,8 @@ async def process_create_peer_name(message: Message, state: FSMContext):
         # Генерируем пару ключей
         client_priv, client_pub = awg_service.generate_keypair()
 
-        # Добавляем в рантайм WireGuard
-        await docker_service.add_peer_runtime(client_pub, client_ip)
+        # Добавляем в рантайм WireGuard и Amnezia clientsTable
+        await docker_service.add_peer_runtime(client_pub, client_ip, name=raw_name, private_key=client_priv)
 
         # Сохраняем в базу данных
         peer_id = await models.add_peer(raw_name, client_pub, client_priv, client_ip)
@@ -219,8 +223,9 @@ async def send_peer_materials(callback: CallbackQuery, peer_id: int, send_files:
 
     # Отправка файлов
     if send_files:
-        conf_file = BufferedInputFile(native_conf.encode("utf-8"), filename=f"{name}-native.conf")
-        vpn_file = BufferedInputFile(vpn_json.encode("utf-8"), filename=f"{name}.vpn")
+        safe_filename = re.sub(r'[^a-zA-Z0-9_\-]', '_', name).strip('_') or 'client'
+        conf_file = BufferedInputFile(native_conf.encode("utf-8"), filename=f"{safe_filename}-native.conf")
+        vpn_file = BufferedInputFile(vpn_json.encode("utf-8"), filename=f"{safe_filename}.vpn")
 
         await callback.message.answer_document(
             document=conf_file,
@@ -451,6 +456,80 @@ async def cb_delete_exec(callback: CallbackQuery):
 
     # Возврат к списку
     await cb_list_peers(callback)
+
+
+# --- Переименование конфига ---
+
+@peers_router.callback_query(IsAdminFilter(), F.data.startswith("rename_peer:"))
+async def cb_rename_peer_start(callback: CallbackQuery, state: FSMContext):
+    peer_id = int(callback.data.split(":")[1])
+    peer = await models.get_peer_by_id(peer_id)
+    if not peer:
+        await callback.answer("Конфиг не найден", show_alert=True)
+        return
+
+    await state.update_data(rename_peer_id=peer_id)
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"view_peer:{peer_id}")]]
+    )
+    await callback.message.edit_text(
+        f"✏️ <b>Переименование конфига «{html.escape(peer['name'])}»:</b>\n\n"
+        f"Введите новое имя клиента (например: <code>iPhone Вани</code>, <code>Ноутбук</code>, <code>worker-pc</code>):",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await state.set_state(RenamePeerState.waiting_for_name)
+    await callback.answer()
+
+
+@peers_router.message(IsAdminFilter(), RenamePeerState.waiting_for_name)
+async def process_rename_peer(message: Message, state: FSMContext):
+    new_name = message.text.strip()
+    data = await state.get_data()
+    peer_id = data.get("rename_peer_id")
+    if not peer_id:
+        await state.clear()
+        return
+
+    peer = await models.get_peer_by_id(peer_id)
+    if not peer:
+        await state.clear()
+        await message.answer("Конфиг не найден.")
+        return
+
+    if len(new_name) < 2 or len(new_name) > 36 or any(c in new_name for c in "\n\r\t`$\"';/\\<>|"):
+        await message.answer(
+            "⚠️ <b>Некорректное имя!</b>\n\n"
+            "Имя должно содержать от 2 до 36 символов и не содержать спецсимволов кавычек и слэшей.\n"
+            "Попробуйте еще раз:"
+        )
+        return
+
+    existing = await models.get_peer_by_name(new_name)
+    if existing and existing["id"] != peer_id:
+        await message.answer(
+            f"⚠️ Конфиг с именем <code>{html.escape(new_name)}</code> уже существует!\n"
+            "Пожалуйста, выберите другое имя:"
+        )
+        return
+
+    # Обновляем в SQLite
+    await models.update_peer_info(peer_id=peer_id, name=new_name)
+    # Обновляем в clientsTable Amnezia если файл есть
+    await docker_service.rename_peer_in_amnezia_table(peer["public_key"], new_name)
+    await state.clear()
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="👤 К карточке конфига", callback_data=f"view_peer:{peer_id}")],
+            [InlineKeyboardButton(text="👥 Список всех конфигов", callback_data="list_peers:0")]
+        ]
+    )
+    await message.answer(
+        f"✅ Конфиг успешно переименован в <b>«{html.escape(new_name)}»</b>!",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
 
 
 @peers_router.callback_query(F.data == "noop")

@@ -31,7 +31,9 @@ class DockerService:
         def _run():
             try:
                 container = self._get_client().containers.get(settings.vpn_container_name)
-                res = container.exec_run(cmd)
+                # Ensure execution through sh -c for proper environment and argument parsing
+                exec_cmd = ["sh", "-c", cmd] if isinstance(cmd, str) else cmd
+                res = container.exec_run(exec_cmd)
                 output = res.output.decode("utf-8", errors="replace").strip()
                 return res.exit_code, output
             except Exception as e:
@@ -67,16 +69,29 @@ class DockerService:
         Executes 'wg show all dump' (or 'awg show all dump') inside container.
         Returns: (interface_info_dict, list_of_peers_dict)
         """
-        code, out = await self.exec_cmd(f"{self._wg_bin} show all dump")
-        if code != 0 or not out:
-            # Try fallback to wg or awg
-            alt_bin = "awg" if self._wg_bin == "wg" else "wg"
-            code, out = await self.exec_cmd(f"{alt_bin} show all dump")
-            if code == 0:
-                self._wg_bin = alt_bin
-            else:
-                logger.error(f"Failed to get wg dump: {out}")
-                return None, []
+        dump_commands = [
+            f"{self._wg_bin} show all dump",
+            "awg show all dump",
+            "wg show all dump",
+            f"{self._wg_bin} show dump",
+            "awg show dump",
+            "wg show dump"
+        ]
+
+        out = ""
+        code = -1
+        for cmd in dump_commands:
+            code, out = await self.exec_cmd(cmd)
+            if code == 0 and out.strip():
+                if "awg" in cmd:
+                    self._wg_bin = "awg"
+                elif "wg" in cmd and self._wg_bin != "awg":
+                    self._wg_bin = "wg"
+                break
+
+        if code != 0 or not out.strip():
+            logger.error(f"Failed to get wg dump. Exit code: {code}, output: {out}")
+            return None, []
 
         lines = [line.strip() for line in out.splitlines() if line.strip()]
         if not lines:
@@ -86,15 +101,32 @@ class DockerService:
         peers = []
 
         for line in lines:
-            parts = line.split("\t")
-            if len(parts) == 5:
-                # Interface line: <iface> <privkey> <pubkey> <port> <fwmark>
+            # Handle both tab-separated and multiple space separated outputs
+            parts = [p.strip() for p in line.split("\t") if p.strip()]
+            if len(parts) < 4:
+                parts = line.split()
+
+            if 4 <= len(parts) <= 5 and interface_info is None:
+                # Interface line
+                if len(parts) == 5 or not parts[0].endswith("="):
+                    iface = parts[0]
+                    privkey = parts[1]
+                    pubkey = parts[2]
+                    port = int(parts[3]) if parts[3].isdigit() else parts[3]
+                    fwmark = parts[4] if len(parts) > 4 else "off"
+                else:
+                    iface = settings.wg_interface or "awg0"
+                    privkey = parts[0]
+                    pubkey = parts[1]
+                    port = int(parts[2]) if parts[2].isdigit() else parts[2]
+                    fwmark = parts[3] if len(parts) > 3 else "off"
+
                 interface_info = {
-                    "interface": parts[0],
-                    "private_key": parts[1],
-                    "public_key": parts[2],
-                    "listen_port": int(parts[3]) if parts[3].isdigit() else parts[3],
-                    "fwmark": parts[4]
+                    "interface": iface,
+                    "private_key": privkey,
+                    "public_key": pubkey,
+                    "listen_port": port,
+                    "fwmark": fwmark
                 }
             elif len(parts) >= 8:
                 # Peer line: <iface> <pubkey> <preshared_key> <endpoint> <allowed_ips> <latest_handshake> <rx_bytes> <tx_bytes> [<persistent_keepalive>]

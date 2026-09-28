@@ -111,7 +111,7 @@ async def cb_clients_ranking(callback: CallbackQuery):
             tot_str = awg_service.format_bytes(p.get("total", 0))
 
             lines.append(
-                f"{idx}. {status_icon} <b>{html.escape(p['name'])}</b> (<code>{p['ip_address']}</code>)\n"
+                f"{idx}. {status_icon} <b>{html.escape(p['name'])}</b>\n"
                 f"   📥 {rx_str} | 📤 {tx_str} | 📊 <b>{tot_str}</b>\n"
                 f"   <i>Активность: {hs_str}</i>\n"
             )

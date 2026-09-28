@@ -316,7 +316,7 @@ async def cb_list_peers(callback: CallbackQuery):
         else:
             status_icon = "🟡"
 
-        btn_text = f"{status_icon} {p['name']} ({p['ip_address']})"
+        btn_text = f"{status_icon} {p['name']}"
         keyboard_rows.append([InlineKeyboardButton(text=btn_text, callback_data=f"view_peer:{p['id']}")])
 
     # Пагинация

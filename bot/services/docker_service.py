@@ -442,27 +442,55 @@ class DockerService:
         if isinstance(raw_data, list):
             items = raw_data
         elif isinstance(raw_data, dict):
-            if "clients" in raw_data and isinstance(raw_data["clients"], list):
-                items = raw_data["clients"]
-            elif "clients" in raw_data and isinstance(raw_data["clients"], dict):
-                items = list(raw_data["clients"].values())
-            else:
-                items = list(raw_data.values())
+            for k in ["clientsTable", "clients", "users", "peers", "data"]:
+                if k in raw_data and isinstance(raw_data[k], list):
+                    items = raw_data[k]
+                    break
+                elif k in raw_data and isinstance(raw_data[k], dict):
+                    items = list(raw_data[k].values())
+                    break
+            if not items:
+                for val in raw_data.values():
+                    if isinstance(val, list):
+                        items.extend(val)
+                    elif isinstance(val, dict):
+                        items.append(val)
 
         results = []
         for item in items:
             if not isinstance(item, dict):
                 continue
 
-            name = (
-                item.get("clientName") or
-                item.get("client_name") or
-                item.get("name") or
-                item.get("userData") or
-                item.get("user_data") or
-                item.get("comment") or
-                item.get("description")
-            )
+            user_data = item.get("userData") or item.get("user_data")
+            if isinstance(user_data, str) and user_data.strip().startswith("{"):
+                try:
+                    user_data = json.loads(user_data)
+                except Exception:
+                    pass
+
+            name = None
+            if isinstance(user_data, dict):
+                name = (
+                    user_data.get("clientName") or
+                    user_data.get("client_name") or
+                    user_data.get("name") or
+                    user_data.get("userName") or
+                    user_data.get("user_name")
+                )
+            elif isinstance(user_data, str) and user_data.strip() and not user_data.strip().startswith("{"):
+                name = user_data.strip()
+
+            if not name:
+                name = (
+                    item.get("clientName") or
+                    item.get("client_name") or
+                    item.get("name") or
+                    item.get("userName") or
+                    item.get("user_name") or
+                    item.get("comment") or
+                    item.get("description")
+                )
+
             pubkey = (
                 item.get("client_pub_key") or
                 item.get("clientPubKey") or
@@ -474,6 +502,9 @@ class DockerService:
                 item.get("pubkey") or
                 item.get("pubKey")
             )
+            if not pubkey and isinstance(user_data, dict):
+                pubkey = user_data.get("client_pub_key") or user_data.get("publicKey") or user_data.get("public_key")
+
             privkey = (
                 item.get("client_priv_key") or
                 item.get("clientPrivKey") or
@@ -485,13 +516,33 @@ class DockerService:
                 item.get("privkey") or
                 item.get("privKey")
             )
+            if not privkey and isinstance(user_data, dict):
+                privkey = user_data.get("client_priv_key") or user_data.get("privateKey") or user_data.get("private_key")
+
             ip = (
                 item.get("client_ip") or
                 item.get("clientIp") or
                 item.get("ip") or
                 item.get("ip_address") or
-                item.get("address")
+                item.get("address") or
+                item.get("allowedIps") or
+                item.get("allowed_ips")
             )
+            if not ip and isinstance(user_data, dict):
+                ip = (
+                    user_data.get("client_ip") or
+                    user_data.get("clientIp") or
+                    user_data.get("ip") or
+                    user_data.get("ip_address") or
+                    user_data.get("allowedIps") or
+                    user_data.get("allowed_ips")
+                )
+
+            client_id = item.get("clientId")
+            if client_id is None and isinstance(user_data, dict):
+                client_id = user_data.get("clientId")
+            if client_id is None:
+                client_id = item.get("id")
 
             name_str = str(name).strip() if name is not None else ""
             pubkey_str = str(pubkey).strip() if pubkey else ""
@@ -505,7 +556,8 @@ class DockerService:
                     "name": name_str,
                     "public_key": pubkey_str,
                     "private_key": privkey_str,
-                    "ip": ip_str
+                    "ip": ip_str,
+                    "client_id": str(client_id).strip() if client_id is not None else None
                 })
 
         logger.info(f"Loaded {len(results)} client records from Amnezia clientsTable ({path})")
@@ -629,11 +681,14 @@ class DockerService:
             # Index Amnezia clients
             table_by_pubkey = {}
             table_by_ip = {}
+            table_by_client_id = {}
             for c in amnezia_clients:
                 if c.get("public_key"):
                     table_by_pubkey[c["public_key"]] = c
                 if c.get("ip"):
                     table_by_ip[c["ip"]] = c
+                if c.get("client_id"):
+                    table_by_client_id[c["client_id"]] = c
 
             config_names = await self.parse_peer_names_from_config()
             synced_pubkeys = set()
@@ -650,6 +705,10 @@ class DockerService:
 
                     # Look up in Amnezia clientsTable first
                     c_info = table_by_pubkey.get(pubkey) or table_by_ip.get(ip) or {}
+                    if not c_info and config_names.get(pubkey):
+                        comm = config_names.get(pubkey).strip()
+                        c_info = table_by_client_id.get(comm) or table_by_client_id.get(comm.replace("clientId:", "").strip()) or {}
+
                     c_name = c_info.get("name")
                     c_priv = c_info.get("private_key") or ""
 

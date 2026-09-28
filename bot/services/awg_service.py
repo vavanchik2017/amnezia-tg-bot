@@ -72,16 +72,8 @@ class AWGService:
             f"DNS = {dns_str}"
         ]
 
-        # Standard and advanced AWG params
-        keys_order = [
-            "Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4",
-            "H1", "H2", "H3", "H4",
-            "I1", "I2", "I3", "I4", "I5",
-            "HeaderProtectionKey", "ContentPaddingAddition",
-            "RekeyAfterTime", "RekeyTimeout", "RejectAfterTime",
-            "KeepaliveTimeout", "MaxHandshakeAttempts",
-            "RandomTrailers", "DisableCookies"
-        ]
+        # Standard AWG parameters strictly supported by AmneziaWG apps
+        keys_order = ["Jc", "Jmin", "Jmax", "S1", "S2", "H1", "H2", "H3", "H4"]
         defaults = {
             "Jc": 3, "Jmin": 40, "Jmax": 70, "S1": 15, "S2": 57,
             "H1": 1, "H2": 2, "H3": 3, "H4": 4
@@ -153,15 +145,7 @@ class AWGService:
             preshared_key=preshared_key
         )
 
-        keys_order = [
-            "Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4",
-            "H1", "H2", "H3", "H4",
-            "I1", "I2", "I3", "I4", "I5",
-            "HeaderProtectionKey", "ContentPaddingAddition",
-            "RekeyAfterTime", "RekeyTimeout", "RejectAfterTime",
-            "KeepaliveTimeout", "MaxHandshakeAttempts",
-            "RandomTrailers", "DisableCookies"
-        ]
+        keys_order = ["Jc", "Jmin", "Jmax", "S1", "S2", "H1", "H2", "H3", "H4"]
         json_awg_params = {}
         for k in keys_order:
             if k in awg_params and awg_params[k] is not None and str(awg_params[k]).strip() != "":

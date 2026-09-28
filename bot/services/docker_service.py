@@ -260,7 +260,7 @@ class DockerService:
         return None
 
     async def get_awg_params(self, iface: str) -> Dict[str, Any]:
-        """Extracts AmneziaWG obfuscation parameters from server config file."""
+        """Extracts standard AmneziaWG obfuscation parameters from server config file."""
         config_path = await self.find_config_file(iface)
         params = {
             "Jc": 3,
@@ -282,51 +282,75 @@ class DockerService:
         if code != 0 or not content:
             return params
 
-        known_map = {
+        standard_keys = {
             "JC": "Jc", "JMIN": "Jmin", "JMAX": "Jmax",
-            "S1": "S1", "S2": "S2", "S3": "S3", "S4": "S4",
-            "H1": "H1", "H2": "H2", "H3": "H3", "H4": "H4",
-            "I1": "I1", "I2": "I2", "I3": "I3", "I4": "I4", "I5": "I5",
-            "HEADERPROTECTIONKEY": "HeaderProtectionKey",
-            "CONTENTPADDINGADDITION": "ContentPaddingAddition",
-            "REKEYAFTERTIME": "RekeyAfterTime",
-            "REKEYTIMEOUT": "RekeyTimeout",
-            "REJECTAFTERTIME": "RejectAfterTime",
-            "KEEPALIVETIMEOUT": "KeepaliveTimeout",
-            "MAXHANDSHAKEATTEMPTS": "MaxHandshakeAttempts",
-            "RANDOMTRAILERS": "RandomTrailers",
-            "DISABLECOOKIES": "DisableCookies"
+            "S1": "S1", "S2": "S2",
+            "H1": "H1", "H2": "H2", "H3": "H3", "H4": "H4"
         }
 
+        in_interface = False
         for line in content.splitlines():
             line = line.strip()
-            if line.startswith("[Peer]"):
+            if line.startswith("[Interface]"):
+                in_interface = True
+                continue
+            if line.startswith("[") and not line.startswith("[Interface]"):
+                in_interface = False
                 break
-            is_commented = line.startswith("#")
-            clean_line = line.lstrip("#").strip() if is_commented else line
-            if "=" in clean_line and not clean_line.startswith("["):
-                k, v = [p.strip() for p in clean_line.split("=", 1)]
-                real_key = known_map.get(k.upper())
-                if real_key:
-                    if v and not v.startswith("#") and "[Peer]" not in v:
-                        parsed_val = int(v) if v.isdigit() else v
-                        if not is_commented:
-                            params[real_key] = parsed_val
-                        elif real_key not in params or params[real_key] is None:
-                            params[real_key] = parsed_val
+            if not in_interface:
+                continue
+
+            # Strictly skip commented lines - do not parse inactive parameters like '# I1 = ...'
+            if line.startswith("#") or line.startswith(";"):
+                continue
+
+            if "=" in line:
+                k, v = [p.strip() for p in line.split("=", 1)]
+                real_key = standard_keys.get(k.upper())
+                if real_key and v:
+                    try:
+                        params[real_key] = int(v)
+                    except ValueError:
+                        params[real_key] = v
 
         return params
 
     async def get_preshared_key(self) -> Optional[str]:
-        """Reads server-wide PSK if Amnezia uses one."""
+        """Reads server-wide PSK only if active peers or server configuration actually use it."""
         if self._cached_psk:
             return self._cached_psk
 
+        # 1. Inspect existing peers from wg dump — this is the ultimate ground truth
+        _, peers = await self.get_wg_dump()
+        has_peers = False
+        for p in peers:
+            psk = p.get("preshared_key")
+            if psk:
+                has_peers = True
+                if psk != "(none)" and len(psk) == 44:
+                    logger.info("Loaded server preshared key from active peer in dump")
+                    self._cached_psk = psk
+                    return psk
+
+        # If existing peers exist and none of them use PSK, the server definitely does NOT use PSK
+        if has_peers:
+            logger.info("Active peers in dump do not use PSK (preshared-key is none)")
+            return None
+
+        # 2. Check if awg0.conf explicitly defines PresharedKey in existing [Peer] blocks
+        config_path = await self.find_config_file("awg0")
+        if config_path:
+            code, content = await self.exec_cmd(f"grep -m 1 -E '^[[:space:]]*PresharedKey' {config_path} 2>/dev/null")
+            if code == 0 and content.strip():
+                psk_val = content.split("=", 1)[1].strip()
+                if len(psk_val) == 44:
+                    self._cached_psk = psk_val
+                    return psk_val
+
+        # 3. Only if there are no existing peers at all, check wireguard_psk.key file
         candidates = [
             "/opt/amnezia/awg/wireguard_psk.key",
-            "/opt/amnezia/awg/psk.key",
-            "/etc/amnezia/amneziawg/wireguard_psk.key",
-            "/etc/wireguard/psk.key"
+            "/opt/amnezia/awg/psk.key"
         ]
         for path in candidates:
             code, out = await self.exec_cmd(f"cat {path} 2>/dev/null")
@@ -335,15 +359,6 @@ class DockerService:
                 logger.info(f"Loaded server preshared key from {path}")
                 self._cached_psk = clean_out
                 return clean_out
-
-        # Also inspect existing peers from wg dump if any peer has a valid base64 44-char PSK
-        _, peers = await self.get_wg_dump()
-        for p in peers:
-            psk = p.get("preshared_key")
-            if psk and psk != "(none)" and len(psk) == 44:
-                logger.info("Loaded server preshared key from active peer in dump")
-                self._cached_psk = psk
-                return psk
 
         return None
 

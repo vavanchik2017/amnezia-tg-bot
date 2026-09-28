@@ -15,6 +15,9 @@ from bot.handlers.common import (
     IsAdminFilter,
     get_main_menu_keyboard,
     get_peer_keyboard,
+    get_format_choice_keyboard,
+    get_native_delivery_keyboard,
+    get_vpn_delivery_keyboard,
     get_download_format_keyboard,
     safe_edit_message
 )
@@ -108,9 +111,9 @@ async def process_create_peer_name(message: Message, state: FSMContext):
             f"✅ <b>Конфиг «{html.escape(raw_name)}» успешно создан!</b>\n\n"
             f"• <b>IP адрес:</b> <code>{client_ip}/32</code>\n"
             f"• <b>Публичный ключ:</b> <code>{client_pub[:16]}...</code>\n\n"
-            f"Выберите, как вы хотите его получить:"
+            f"Выберите тип клиентского приложения:"
         )
-        await message.answer(text, reply_markup=get_download_format_keyboard(peer_id), parse_mode="HTML")
+        await message.answer(text, reply_markup=get_format_choice_keyboard(peer_id), parse_mode="HTML")
 
     except Exception as e:
         await state.clear()
@@ -131,35 +134,52 @@ async def cb_download_choice(callback: CallbackQuery):
         await callback.answer("Конфиг не найден", show_alert=True)
         return
 
-    text = f"📥 <b>Получение конфигурации для «{html.escape(peer['name'])}»</b>\n\nВыберите формат выдачи:"
-    await callback.message.edit_text(text, reply_markup=get_download_format_keyboard(peer_id), parse_mode="HTML")
+    text = (
+        f"📥 <b>Получение конфигурации для «{html.escape(peer['name'])}»</b>\n\n"
+        "Выберите тип клиентского приложения:"
+    )
+    await safe_edit_message(callback, text, reply_markup=get_format_choice_keyboard(peer_id), parse_mode="HTML")
     await callback.answer()
 
 
-@peers_router.callback_query(IsAdminFilter(), F.data.startswith("get_files:"))
-async def cb_get_files(callback: CallbackQuery):
-    peer_id = int(callback.data.split(":")[1])
-    await send_peer_materials(callback, peer_id, send_files=True, send_qr=False)
-
-
-@peers_router.callback_query(IsAdminFilter(), F.data.startswith("get_qr:"))
-async def cb_get_qr(callback: CallbackQuery):
-    peer_id = int(callback.data.split(":")[1])
-    await send_peer_materials(callback, peer_id, send_files=False, send_qr=True)
-
-
-@peers_router.callback_query(IsAdminFilter(), F.data.startswith("get_all:"))
-async def cb_get_all(callback: CallbackQuery):
-    peer_id = int(callback.data.split(":")[1])
-    await send_peer_materials(callback, peer_id, send_files=True, send_qr=True)
-
-
-async def send_peer_materials(callback: CallbackQuery, peer_id: int, send_files: bool, send_qr: bool):
-    await callback.answer("Подготовка данных...")
+@peers_router.callback_query(IsAdminFilter(), F.data.startswith("fmt:awg:"))
+async def cb_fmt_awg(callback: CallbackQuery):
+    peer_id = int(callback.data.split(":")[2])
     peer = await models.get_peer_by_id(peer_id)
     if not peer:
-        await callback.message.answer("Конфиг не найден.")
+        await callback.answer("Конфиг не найден", show_alert=True)
         return
+
+    text = (
+        f"⚡️ <b>Native AmneziaWG</b> для «{html.escape(peer['name'])}»\n\n"
+        "Конфигурация для официального клиента <b>AmneziaWG</b> (Android, iOS, Windows, macOS, Linux, роутеры Keenetic/OpenWrt).\n\n"
+        "Выберите способ получения:"
+    )
+    await safe_edit_message(callback, text, reply_markup=get_native_delivery_keyboard(peer_id), parse_mode="HTML")
+    await callback.answer()
+
+
+@peers_router.callback_query(IsAdminFilter(), F.data.startswith("fmt:vpn:"))
+async def cb_fmt_vpn(callback: CallbackQuery):
+    peer_id = int(callback.data.split(":")[2])
+    peer = await models.get_peer_by_id(peer_id)
+    if not peer:
+        await callback.answer("Конфиг не найден", show_alert=True)
+        return
+
+    text = (
+        f"🛡 <b>Amnezia VPN</b> для «{html.escape(peer['name'])}»\n\n"
+        "Конфигурация для официального приложения-комбайна <b>Amnezia VPN</b>.\n\n"
+        "Выберите способ получения:"
+    )
+    await safe_edit_message(callback, text, reply_markup=get_vpn_delivery_keyboard(peer_id), parse_mode="HTML")
+    await callback.answer()
+
+
+async def get_peer_materials_data(peer_id: int):
+    peer = await models.get_peer_by_id(peer_id)
+    if not peer:
+        return None, "Конфиг не найден в базе данных."
 
     name = peer["name"]
     client_ip = peer["ip_address"]
@@ -167,26 +187,16 @@ async def send_peer_materials(callback: CallbackQuery, peer_id: int, send_files:
     client_pub = peer["public_key"]
 
     if not client_priv or not client_priv.strip():
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="➕ Выпустить новый конфиг", callback_data="create_peer")],
-                [InlineKeyboardButton(text="👤 К карточке", callback_data=f"view_peer:{peer_id}")]
-            ]
-        )
-        await callback.message.answer(
+        return None, (
             f"ℹ️ <b>Конфиг «{html.escape(name)}» был создан вне бота</b> (импортирован с сервера).\n\n"
             "Сервер WireGuard хранит только публичный ключ клиента. Приватный ключ находится исключительно на самом клиентском устройстве.\n\n"
-            "Вы можете отслеживать статус и трафик этого клиента, а если нужен новый файл/QR-код — выпустите новый конфиг через бота:",
-            reply_markup=kb,
-            parse_mode="HTML"
+            "Вы можете выпустить новый конфиг через бота, чтобы получить файл или QR-код."
         )
-        return
 
     try:
         server_info = await docker_service.get_server_info()
     except Exception as e:
-        await callback.message.answer(f"❌ Ошибка получения параметров сервера: {e}")
-        return
+        return None, f"❌ Ошибка подключения к серверу: {e}"
 
     host = server_info["host"]
     port = server_info["port"]
@@ -195,7 +205,6 @@ async def send_peer_materials(callback: CallbackQuery, peer_id: int, send_files:
     preshared_key = server_info.get("preshared_key")
     target_container = settings.vpn_container_name or "amnezia-awg2"
 
-    # Формируем Native Conf
     native_conf = awg_service.build_native_conf(
         client_privkey=client_priv,
         client_ip=client_ip,
@@ -206,7 +215,6 @@ async def send_peer_materials(callback: CallbackQuery, peer_id: int, send_files:
         preshared_key=preshared_key
     )
 
-    # Формируем Amnezia VPN (.vpn) JSON и ссылку
     vpn_json, vpn_uri = awg_service.build_amnezia_vpn_json(
         client_name=name,
         client_privkey=client_priv,
@@ -220,66 +228,233 @@ async def send_peer_materials(callback: CallbackQuery, peer_id: int, send_files:
         container_name=target_container
     )
 
-    # Предупреждение об IP
-    if host == "127.0.0.1":
-        await callback.message.answer(
-            "⚠️ <b>Внимание:</b> IP сервера определен как <code>127.0.0.1</code>! Клиенты не смогут подключиться из интернета, пока вы не укажете публичный IP в <code>SERVER_HOST</code> в файле <code>.env</code> на сервере.",
-            parse_mode="HTML"
-        )
+    safe_filename = re.sub(r'[^a-zA-Z0-9_\-]', '_', name).strip('_') or 'client'
 
-    # Отправка файлов
-    if send_files:
-        safe_filename = re.sub(r'[^a-zA-Z0-9_\-]', '_', name).strip('_') or 'client'
-        conf_file = BufferedInputFile(native_conf.encode("utf-8"), filename=f"{safe_filename}-native.conf")
-        vpn_file = BufferedInputFile(vpn_json.encode("utf-8"), filename=f"{safe_filename}.vpn")
+    return {
+        "peer": peer,
+        "name": name,
+        "safe_filename": safe_filename,
+        "native_conf": native_conf,
+        "vpn_json": vpn_json,
+        "vpn_uri": vpn_uri,
+        "host": host
+    }, None
 
-        await callback.message.answer_document(
-            document=conf_file,
-            caption=f"📄 <b>Native AmneziaWG</b> конфиг для <code>{html.escape(name)}</code>\nИмпортируйте в официальное приложение AmneziaWG (Android / iOS / Windows).",
-            parse_mode="HTML"
-        )
-        await callback.message.answer_document(
-            document=vpn_file,
-            caption=f"🛡 <b>Amnezia VPN</b> файл для <code>{html.escape(name)}</code>\nИмпортируйте в приложение Amnezia VPN.",
-            parse_mode="HTML"
-        )
 
-    # Отправка QR-кодов
-    if send_qr:
-        # QR для Native Conf
-        qr_conf_bio = awg_service.generate_qr_code(native_conf)
-        qr_conf_file = BufferedInputFile(qr_conf_bio.read(), filename="qr_native.png")
-        await callback.message.answer_photo(
-            photo=qr_conf_file,
-            caption=f"📱 <b>QR-код Native AmneziaWG</b> для <code>{html.escape(name)}</code>\n\n⚠️ Сканируйте именно в приложении <b>AmneziaWG</b> (синий официальный WireGuard не поддерживает обфускацию)!",
-            parse_mode="HTML"
-        )
+@peers_router.callback_query(IsAdminFilter(), F.data.startswith("deliv:awg_qr:"))
+async def cb_deliv_awg_qr(callback: CallbackQuery):
+    peer_id = int(callback.data.split(":")[2])
+    data, err = await get_peer_materials_data(peer_id)
+    if err:
+        await callback.message.answer(err, parse_mode="HTML")
+        await callback.answer()
+        return
+    await callback.answer("Генерируем QR-код...")
 
-        # QR для Amnezia VPN
-        qr_vpn_bio = awg_service.generate_qr_code(vpn_uri)
-        qr_vpn_file = BufferedInputFile(qr_vpn_bio.read(), filename="qr_amnezia.png")
-        await callback.message.answer_photo(
-            photo=qr_vpn_file,
-            caption=f"🛡 <b>QR-код Amnezia VPN</b> для <code>{html.escape(name)}</code>\nДля сканирования в приложении Amnezia VPN.",
-            parse_mode="HTML"
-        )
+    qr_bio = awg_service.generate_qr_code(data["native_conf"])
+    qr_file = BufferedInputFile(qr_bio.read(), filename=f"{data['safe_filename']}_awg.png")
 
-    # Отправка текстовой vpn:// ссылки для мгновенного копирования
-    await callback.message.answer(
-        f"🔗 <b>Ссылка подключения Amnezia VPN для «{html.escape(name)}»:</b>\n\n"
-        f"<code>{vpn_uri}</code>\n\n"
-        f"<i>💡 Нажмите на ссылку, чтобы скопировать. При открытии приложения Amnezia VPN оно само предложит импортировать её из буфера обмена!</i>",
+    back_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Другой способ", callback_data=f"fmt:awg:{peer_id}")],
+            [InlineKeyboardButton(text="👤 К карточке", callback_data=f"view_peer:{peer_id}")]
+        ]
+    )
+
+    await callback.message.answer_photo(
+        photo=qr_file,
+        caption=(
+            f"📱 <b>QR-код Native AmneziaWG</b> для <code>{html.escape(data['name'])}</code>\n\n"
+            "⚠️ Сканируйте именно в приложении <b>AmneziaWG</b> (синий официальный WireGuard не поддерживает обфускацию)!"
+        ),
+        reply_markup=back_kb,
         parse_mode="HTML"
     )
 
-    # Завершающая кнопка возврата
-    kb = InlineKeyboardMarkup(
+
+@peers_router.callback_query(IsAdminFilter(), F.data.startswith("deliv:awg_file:"))
+async def cb_deliv_awg_file(callback: CallbackQuery):
+    peer_id = int(callback.data.split(":")[2])
+    data, err = await get_peer_materials_data(peer_id)
+    if err:
+        await callback.message.answer(err, parse_mode="HTML")
+        await callback.answer()
+        return
+    await callback.answer("Отправляем файл...")
+
+    conf_file = BufferedInputFile(data["native_conf"].encode("utf-8"), filename=f"{data['safe_filename']}.conf")
+    back_kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="👤 К карточке конфига", callback_data=f"view_peer:{peer_id}")],
-            [InlineKeyboardButton(text="👥 Список всех конфигов", callback_data="list_peers:0")]
+            [InlineKeyboardButton(text="⬅️ Другой способ", callback_data=f"fmt:awg:{peer_id}")],
+            [InlineKeyboardButton(text="👤 К карточке", callback_data=f"view_peer:{peer_id}")]
         ]
     )
-    await callback.message.answer("Выберите дальнейшее действие:", reply_markup=kb)
+
+    await callback.message.answer_document(
+        document=conf_file,
+        caption=(
+            f"📄 <b>Файл Native AmneziaWG (.conf)</b> для <code>{html.escape(data['name'])}</code>\n\n"
+            "Импортируйте этот файл в приложение <b>AmneziaWG</b>."
+        ),
+        reply_markup=back_kb,
+        parse_mode="HTML"
+    )
+
+
+@peers_router.callback_query(IsAdminFilter(), F.data.startswith("deliv:awg_text:"))
+async def cb_deliv_awg_text(callback: CallbackQuery):
+    peer_id = int(callback.data.split(":")[2])
+    data, err = await get_peer_materials_data(peer_id)
+    if err:
+        await callback.message.answer(err, parse_mode="HTML")
+        await callback.answer()
+        return
+    await callback.answer()
+
+    back_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Другой способ", callback_data=f"fmt:awg:{peer_id}")],
+            [InlineKeyboardButton(text="👤 К карточке", callback_data=f"view_peer:{peer_id}")]
+        ]
+    )
+
+    await callback.message.answer(
+        f"📋 <b>Конфигурация Native AmneziaWG для «{html.escape(data['name'])}»:</b>\n\n"
+        f"<pre><code>{html.escape(data['native_conf'])}</code></pre>\n\n"
+        f"<i>💡 Нажмите на текст, чтобы скопировать.</i>",
+        reply_markup=back_kb,
+        parse_mode="HTML"
+    )
+
+
+@peers_router.callback_query(IsAdminFilter(), F.data.startswith("deliv:vpn_qr:"))
+async def cb_deliv_vpn_qr(callback: CallbackQuery):
+    peer_id = int(callback.data.split(":")[2])
+    data, err = await get_peer_materials_data(peer_id)
+    if err:
+        await callback.message.answer(err, parse_mode="HTML")
+        await callback.answer()
+        return
+    await callback.answer("Генерируем QR-код...")
+
+    qr_bio = awg_service.generate_qr_code(data["vpn_uri"])
+    qr_file = BufferedInputFile(qr_bio.read(), filename=f"{data['safe_filename']}_vpn.png")
+
+    back_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Другой способ", callback_data=f"fmt:vpn:{peer_id}")],
+            [InlineKeyboardButton(text="👤 К карточке", callback_data=f"view_peer:{peer_id}")]
+        ]
+    )
+
+    await callback.message.answer_photo(
+        photo=qr_file,
+        caption=(
+            f"🛡 <b>QR-код Amnezia VPN</b> для <code>{html.escape(data['name'])}</code>\n\n"
+            "Сканируйте камерой в приложении <b>Amnezia VPN</b>."
+        ),
+        reply_markup=back_kb,
+        parse_mode="HTML"
+    )
+
+
+@peers_router.callback_query(IsAdminFilter(), F.data.startswith("deliv:vpn_file:"))
+async def cb_deliv_vpn_file(callback: CallbackQuery):
+    peer_id = int(callback.data.split(":")[2])
+    data, err = await get_peer_materials_data(peer_id)
+    if err:
+        await callback.message.answer(err, parse_mode="HTML")
+        await callback.answer()
+        return
+    await callback.answer("Отправляем файл...")
+
+    vpn_file = BufferedInputFile(data["vpn_json"].encode("utf-8"), filename=f"{data['safe_filename']}.vpn")
+    back_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Другой способ", callback_data=f"fmt:vpn:{peer_id}")],
+            [InlineKeyboardButton(text="👤 К карточке", callback_data=f"view_peer:{peer_id}")]
+        ]
+    )
+
+    await callback.message.answer_document(
+        document=vpn_file,
+        caption=(
+            f"🛡 <b>Файл Amnezia VPN (.vpn)</b> для <code>{html.escape(data['name'])}</code>\n\n"
+            "Импортируйте этот файл в приложение <b>Amnezia VPN</b>."
+        ),
+        reply_markup=back_kb,
+        parse_mode="HTML"
+    )
+
+
+@peers_router.callback_query(IsAdminFilter(), F.data.startswith("deliv:vpn_text:"))
+async def cb_deliv_vpn_text(callback: CallbackQuery):
+    peer_id = int(callback.data.split(":")[2])
+    data, err = await get_peer_materials_data(peer_id)
+    if err:
+        await callback.message.answer(err, parse_mode="HTML")
+        await callback.answer()
+        return
+    await callback.answer()
+
+    back_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Другой способ", callback_data=f"fmt:vpn:{peer_id}")],
+            [InlineKeyboardButton(text="👤 К карточке", callback_data=f"view_peer:{peer_id}")]
+        ]
+    )
+
+    await callback.message.answer(
+        f"🔗 <b>Ссылка Amnezia VPN для «{html.escape(data['name'])}»:</b>\n\n"
+        f"<code>{html.escape(data['vpn_uri'])}</code>\n\n"
+        f"<i>💡 Нажмите на ссылку, чтобы скопировать. При открытии приложения Amnezia VPN оно само предложит импортировать её из буфера обмена!</i>",
+        reply_markup=back_kb,
+        parse_mode="HTML"
+    )
+
+
+@peers_router.callback_query(IsAdminFilter(), F.data.startswith("get_all:"))
+async def cb_get_all(callback: CallbackQuery):
+    peer_id = int(callback.data.split(":")[1])
+    data, err = await get_peer_materials_data(peer_id)
+    if err:
+        await callback.message.answer(err, parse_mode="HTML")
+        await callback.answer()
+        return
+    await callback.answer("Подготовка данных...")
+
+    conf_file = BufferedInputFile(data["native_conf"].encode("utf-8"), filename=f"{data['safe_filename']}.conf")
+    vpn_file = BufferedInputFile(data["vpn_json"].encode("utf-8"), filename=f"{data['safe_filename']}.vpn")
+
+    await callback.message.answer_document(
+        document=conf_file,
+        caption=f"📄 <b>Native AmneziaWG (.conf)</b> для <code>{html.escape(data['name'])}</code>",
+        parse_mode="HTML"
+    )
+    await callback.message.answer_document(
+        document=vpn_file,
+        caption=f"🛡 <b>Amnezia VPN (.vpn)</b> для <code>{html.escape(data['name'])}</code>",
+        parse_mode="HTML"
+    )
+
+    qr_conf_bio = awg_service.generate_qr_code(data["native_conf"])
+    qr_conf_file = BufferedInputFile(qr_conf_bio.read(), filename="qr_native.png")
+    await callback.message.answer_photo(
+        photo=qr_conf_file,
+        caption=f"📱 <b>QR Native AmneziaWG</b> для <code>{html.escape(data['name'])}</code>",
+        parse_mode="HTML"
+    )
+
+    await callback.message.answer(
+        f"🔗 <b>Ссылка Amnezia VPN для «{html.escape(data['name'])}»:</b>\n\n"
+        f"<code>{html.escape(data['vpn_uri'])}</code>",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="👤 К карточке", callback_data=f"view_peer:{peer_id}")]
+            ]
+        ),
+        parse_mode="HTML"
+    )
 
 
 # --- Список и просмотр пиров ---

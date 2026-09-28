@@ -36,8 +36,16 @@ class DockerService:
                 res = container.exec_run(exec_cmd)
                 output = res.output.decode("utf-8", errors="replace").strip()
                 return res.exit_code, output
+            except docker.errors.NotFound:
+                try:
+                    all_c = [c.name for c in self._get_client().containers.list()]
+                except Exception:
+                    all_c = []
+                err = f"Контейнер '{settings.vpn_container_name}' не найден в Docker! Запущенные контейнеры: {all_c}"
+                logger.error(err)
+                return -1, err
             except Exception as e:
-                logger.error(f"Error executing command in container: {e}")
+                logger.error(f"Error executing command in container '{settings.vpn_container_name}': {e}")
                 return -1, str(e)
         return await asyncio.to_thread(_run)
 
@@ -80,6 +88,7 @@ class DockerService:
 
         out = ""
         code = -1
+        last_out = ""
         for cmd in dump_commands:
             code, out = await self.exec_cmd(cmd)
             if code == 0 and out.strip():
@@ -88,9 +97,12 @@ class DockerService:
                 elif "wg" in cmd and self._wg_bin != "awg":
                     self._wg_bin = "wg"
                 break
+            else:
+                last_out = out
 
         if code != 0 or not out.strip():
-            logger.error(f"Failed to get wg dump. Exit code: {code}, output: {out}")
+            self._last_error = f"Код {code}: {last_out or out or 'пустой ответ'}"
+            logger.error(f"Failed to get wg dump. Exit code: {code}, output: {last_out or out}")
             return None, []
 
         lines = [line.strip() for line in out.splitlines() if line.strip()]
@@ -237,7 +249,8 @@ class DockerService:
 
         iface_info, _ = await self.get_wg_dump()
         if not iface_info:
-            raise RuntimeError(f"Could not connect to {settings.vpn_container_name} or read interface dump.")
+            detail = getattr(self, "_last_error", "не удалось прочитать дамп интерфейса")
+            raise RuntimeError(f"Контейнер '{settings.vpn_container_name}': {detail}")
 
         iface_name = settings.wg_interface or iface_info["interface"]
         port = settings.server_port or iface_info["listen_port"]

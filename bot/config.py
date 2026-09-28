@@ -23,6 +23,13 @@ class Settings(BaseSettings):
         extra="ignore"
     )
 
+    @field_validator("vpn_container_name", "server_host", "wg_interface", mode="before")
+    @classmethod
+    def strip_quotes(cls, v):
+        if isinstance(v, str):
+            return v.strip("'\" \t")
+        return v
+
     @field_validator("server_port", mode="before")
     @classmethod
     def parse_server_port(cls, v):

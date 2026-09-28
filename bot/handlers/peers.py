@@ -15,7 +15,8 @@ from bot.handlers.common import (
     IsAdminFilter,
     get_main_menu_keyboard,
     get_peer_keyboard,
-    get_download_format_keyboard
+    get_download_format_keyboard,
+    safe_edit_message
 )
 from bot.database import models
 from bot.services.docker_service import docker_service
@@ -301,7 +302,7 @@ async def cb_list_peers(callback: CallbackQuery):
         f"⏸ — временно отключен\n\n"
         f"<i>Нажмите на конфиг для управления:</i>"
     )
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows), parse_mode="HTML")
+    await safe_edit_message(callback, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows), parse_mode="HTML")
     await callback.answer()
 
 
@@ -332,7 +333,8 @@ async def cb_view_peer(callback: CallbackQuery):
         f"• <b>Публичный ключ:</b>\n<code>{peer['public_key']}</code>\n"
     )
 
-    await callback.message.edit_text(
+    await safe_edit_message(
+        callback,
         text,
         reply_markup=get_peer_keyboard(peer_id, is_active),
         parse_mode="HTML"

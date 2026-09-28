@@ -4,7 +4,7 @@ from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 from bot.config import settings
-from bot.handlers.common import IsAdminFilter, get_main_menu_keyboard
+from bot.handlers.common import IsAdminFilter, get_main_menu_keyboard, safe_edit_message
 from bot.services.docker_service import docker_service
 from bot.database import models
 
@@ -48,7 +48,7 @@ async def cb_main_menu(callback: CallbackQuery):
         "📋 <b>Главное меню управления AmneziaWG:</b>\n\n"
         "Выберите нужный раздел:"
     )
-    await callback.message.edit_text(text, reply_markup=get_main_menu_keyboard(), parse_mode="HTML")
+    await safe_edit_message(callback, text, reply_markup=get_main_menu_keyboard(), parse_mode="HTML")
     await callback.answer()
 
 
@@ -65,7 +65,7 @@ async def cb_server_status(callback: CallbackQuery):
             f"Убедитесь, что контейнер запущен и сокет Docker смонтирован."
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="main_menu")]])
-        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        await safe_edit_message(callback, text, reply_markup=kb, parse_mode="HTML")
         return
 
     try:
@@ -99,4 +99,5 @@ async def cb_server_status(callback: CallbackQuery):
             [InlineKeyboardButton(text="⬅️ В меню", callback_data="main_menu")]
         ]
     )
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await safe_edit_message(callback, text, reply_markup=kb, parse_mode="HTML")
+

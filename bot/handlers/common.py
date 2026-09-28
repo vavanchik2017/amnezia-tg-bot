@@ -59,3 +59,15 @@ def get_download_format_keyboard(peer_id: int) -> InlineKeyboardMarkup:
         ]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+async def safe_edit_message(callback: CallbackQuery, text: str, reply_markup: InlineKeyboardMarkup = None, parse_mode: str = "HTML"):
+    from aiogram.exceptions import TelegramBadRequest
+    try:
+        await callback.message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e).lower():
+            await callback.answer("Данные уже актуальны! ✅")
+        else:
+            raise
+

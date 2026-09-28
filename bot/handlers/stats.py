@@ -2,7 +2,7 @@ import html
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
-from bot.handlers.common import IsAdminFilter
+from bot.handlers.common import IsAdminFilter, safe_edit_message
 from bot.database import models
 from bot.services.awg_service import awg_service
 from bot.services.stats_service import stats_service
@@ -44,7 +44,7 @@ async def cb_server_stats(callback: CallbackQuery):
             [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")]
         ]
     )
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await safe_edit_message(callback, text, reply_markup=kb, parse_mode="HTML")
 
 
 @stats_router.callback_query(IsAdminFilter(), F.data.startswith("peer_stats:"))
@@ -78,4 +78,4 @@ async def cb_peer_stats(callback: CallbackQuery):
             [InlineKeyboardButton(text="👥 Список всех конфигов", callback_data="list_peers:0")]
         ]
     )
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await safe_edit_message(callback, text, reply_markup=kb, parse_mode="HTML")

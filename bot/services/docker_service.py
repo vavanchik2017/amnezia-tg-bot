@@ -741,13 +741,16 @@ class DockerService:
                             updates["ip_address"] = ip
 
                         if updates:
-                            await models.update_peer_info(
-                                peer_id=existing["id"],
-                                name=updates.get("name"),
-                                private_key=updates.get("private_key"),
-                                ip_address=updates.get("ip_address")
-                            )
-                            logger.info(f"Updated peer #{existing['id']} with clientsTable info: {updates}")
+                            try:
+                                await models.update_peer_info(
+                                    peer_id=existing["id"],
+                                    name=updates.get("name"),
+                                    private_key=updates.get("private_key"),
+                                    ip_address=updates.get("ip_address")
+                                )
+                                logger.info(f"Updated peer #{existing['id']} with clientsTable info: {updates}")
+                            except Exception as err:
+                                logger.warning(f"Could not update peer #{existing['id']}: {err}")
                     else:
                         name = c_name
                         if not name:
@@ -758,8 +761,11 @@ class DockerService:
                         if existing_name:
                             name = f"{name}-{pubkey[:4]}"
 
-                        await models.import_external_peer(name, pubkey, ip, private_key=c_priv)
-                        logger.info(f"Imported WireGuard peer into database: {name} (IP: {ip}, has_priv: {bool(c_priv)})")
+                        try:
+                            await models.import_external_peer(name, pubkey, ip, private_key=c_priv)
+                            logger.info(f"Imported WireGuard peer into database: {name} (IP: {ip}, has_priv: {bool(c_priv)})")
+                        except Exception as err:
+                            logger.warning(f"Could not import WireGuard peer {pubkey[:10]}: {err}")
 
             # Also check clients in clientsTable not seen in wg_dump
             for c in amnezia_clients:
@@ -778,17 +784,23 @@ class DockerService:
                     if priv and not existing.get("private_key"):
                         updates["private_key"] = priv
                     if updates:
-                        await models.update_peer_info(
-                            peer_id=existing["id"],
-                            name=updates.get("name"),
-                            private_key=updates.get("private_key")
-                        )
+                        try:
+                            await models.update_peer_info(
+                                peer_id=existing["id"],
+                                name=updates.get("name"),
+                                private_key=updates.get("private_key")
+                            )
+                        except Exception as err:
+                            logger.warning(f"Could not update peer #{existing['id']}: {err}")
                 else:
                     existing_name = await models.get_peer_by_name(name)
                     if existing_name:
                         name = f"{name}-{pubkey[:4]}"
-                    await models.import_external_peer(name, pubkey, ip, private_key=priv)
-                    logger.info(f"Imported clientsTable peer: {name} (IP: {ip})")
+                    try:
+                        await models.import_external_peer(name, pubkey, ip, private_key=priv)
+                        logger.info(f"Imported clientsTable peer: {name} (IP: {ip})")
+                    except Exception as err:
+                        logger.warning(f"Could not import clientsTable peer {pubkey[:10]}: {err}")
 
             # Direct sweep of all peers currently in DB to rename any Client-...
             all_db_peers = await models.get_all_peers()
@@ -807,12 +819,15 @@ class DockerService:
                     if match and match.get("name"):
                         real_name = match["name"].strip()
                         if real_name:
-                            await models.update_peer_info(
-                                peer_id=db_p["id"],
-                                name=real_name,
-                                private_key=match.get("private_key") or None
-                            )
-                            logger.info(f"Fixed peer #{db_p['id']} name: '{curr_name}' -> '{real_name}'")
+                            try:
+                                await models.update_peer_info(
+                                    peer_id=db_p["id"],
+                                    name=real_name,
+                                    private_key=match.get("private_key") or None
+                                )
+                                logger.info(f"Fixed peer #{db_p['id']} name: '{curr_name}' -> '{real_name}'")
+                            except Exception as err:
+                                logger.warning(f"Could not fix peer #{db_p['id']} name: {err}")
 
         except Exception as e:
             logger.error(f"Error during sync_peers_from_wireguard: {e}", exc_info=True)

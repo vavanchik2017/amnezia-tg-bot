@@ -5,12 +5,13 @@ from bot.database.db import get_db
 
 async def add_peer(name: str, public_key: str, private_key: str, ip_address: str) -> int:
     db = await get_db()
+    safe_name = await ensure_unique_name(name)
     cursor = await db.execute(
         """
         INSERT INTO peers (name, public_key, private_key, ip_address, is_active)
         VALUES (?, ?, ?, ?, 1)
         """,
-        (name, public_key, private_key, ip_address)
+        (safe_name, public_key, private_key, ip_address)
     )
     await db.commit()
     return cursor.lastrowid
@@ -87,19 +88,44 @@ async def delete_peer(peer_id: int) -> bool:
     return False
 
 
+async def ensure_unique_name(name: str, exclude_peer_id: Optional[int] = None) -> str:
+    """Generates a non-conflicting peer name by appending a counter if needed."""
+    db = await get_db()
+    base_name = name.strip() if (name and name.strip()) else "Client"
+    candidate = base_name
+    counter = 2
+    while True:
+        if exclude_peer_id is not None:
+            cursor = await db.execute("SELECT id FROM peers WHERE name = ? AND id != ?", (candidate, exclude_peer_id))
+        else:
+            cursor = await db.execute("SELECT id FROM peers WHERE name = ?", (candidate,))
+        row = await cursor.fetchone()
+        if not row:
+            return candidate
+        candidate = f"{base_name}-{counter}"
+        counter += 1
+
+
 async def import_external_peer(name: str, public_key: str, ip_address: str, private_key: str = "") -> int:
     db = await get_db()
+    existing = await get_peer_by_pubkey(public_key)
+    if existing:
+        safe_name = await ensure_unique_name(name, exclude_peer_id=existing["id"])
+        await update_peer_info(peer_id=existing["id"], name=safe_name, private_key=private_key or None, ip_address=ip_address)
+        return existing["id"]
+
+    safe_name = await ensure_unique_name(name)
     cursor = await db.execute(
         """
         INSERT INTO peers (name, public_key, private_key, ip_address, is_active)
         VALUES (?, ?, ?, ?, 1)
         ON CONFLICT(public_key) DO UPDATE SET
-            name = CASE WHEN excluded.name NOT LIKE 'Client-%' THEN excluded.name ELSE peers.name END,
+            name = excluded.name,
             private_key = CASE WHEN excluded.private_key != '' THEN excluded.private_key ELSE peers.private_key END,
             ip_address = excluded.ip_address,
             is_active = 1
         """,
-        (name, public_key, private_key, ip_address)
+        (safe_name, public_key, private_key, ip_address)
     )
     await db.commit()
     return cursor.lastrowid
@@ -114,9 +140,10 @@ async def update_peer_info(
     db = await get_db()
     updates = []
     params = []
-    if name:
+    if name is not None and name.strip():
+        safe_name = await ensure_unique_name(name, exclude_peer_id=peer_id)
         updates.append("name = ?")
-        params.append(name)
+        params.append(safe_name)
     if private_key:
         updates.append("private_key = ?")
         params.append(private_key)

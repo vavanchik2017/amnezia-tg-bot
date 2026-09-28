@@ -544,6 +544,17 @@ class DockerService:
             if client_id is None:
                 client_id = item.get("id")
 
+            if not pubkey and client_id and isinstance(client_id, str):
+                cleaned_cid = client_id.strip()
+                if len(cleaned_cid) == 44 and cleaned_cid.endswith("="):
+                    pubkey = cleaned_cid
+
+            config_text = item.get("config") or (user_data.get("config") if isinstance(user_data, dict) else None)
+            if config_text and not privkey:
+                m = re.search(r"PrivateKey\s*=\s*([A-Za-z0-9+/=]{44})", str(config_text))
+                if m:
+                    privkey = m.group(1)
+
             name_str = str(name).strip() if name is not None else ""
             pubkey_str = str(pubkey).strip() if pubkey else ""
             privkey_str = str(privkey).strip() if privkey else ""
@@ -551,16 +562,18 @@ class DockerService:
             if "/" in ip_str:
                 ip_str = ip_str.split("/")[0].strip()
 
-            if pubkey_str or ip_str or name_str:
+            cid_str = str(client_id).strip() if client_id is not None else None
+
+            if pubkey_str or ip_str or name_str or cid_str:
                 results.append({
                     "name": name_str,
                     "public_key": pubkey_str,
                     "private_key": privkey_str,
                     "ip": ip_str,
-                    "client_id": str(client_id).strip() if client_id is not None else None
+                    "client_id": cid_str
                 })
 
-        logger.info(f"Loaded {len(results)} client records from Amnezia clientsTable ({path})")
+        logger.info(f"Loaded {len(results)} client records from Amnezia clientsTable ({path}). Sample: {[(r['name'], r['ip']) for r in results[:5]]}")
         return results
 
     async def save_peer_to_amnezia_table(self, name: str, public_key: str, private_key: str, ip_address: str):
@@ -776,6 +789,30 @@ class DockerService:
                         name = f"{name}-{pubkey[:4]}"
                     await models.import_external_peer(name, pubkey, ip, private_key=priv)
                     logger.info(f"Imported clientsTable peer: {name} (IP: {ip})")
+
+            # Direct sweep of all peers currently in DB to rename any Client-...
+            all_db_peers = await models.get_all_peers()
+            for db_p in all_db_peers:
+                curr_name = db_p.get("name", "")
+                if curr_name.startswith("Client-") or not curr_name:
+                    p_ip = db_p.get("ip_address", "").split("/")[0].strip()
+                    p_pub = db_p.get("public_key", "").strip()
+
+                    match = table_by_pubkey.get(p_pub) or table_by_ip.get(p_ip)
+                    if not match and curr_name.startswith("Client-"):
+                        # Extract IP from name like Client-10_8_1_19
+                        extracted_ip = curr_name.replace("Client-", "").replace("_", ".").split("-")[0]
+                        match = table_by_ip.get(extracted_ip)
+
+                    if match and match.get("name"):
+                        real_name = match["name"].strip()
+                        if real_name:
+                            await models.update_peer_info(
+                                peer_id=db_p["id"],
+                                name=real_name,
+                                private_key=match.get("private_key") or None
+                            )
+                            logger.info(f"Fixed peer #{db_p['id']} name: '{curr_name}' -> '{real_name}'")
 
         except Exception as e:
             logger.error(f"Error during sync_peers_from_wireguard: {e}", exc_info=True)

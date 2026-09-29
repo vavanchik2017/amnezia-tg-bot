@@ -62,7 +62,72 @@ class AWGService:
         dns: Optional[str] = None,
         preshared_key: Optional[str] = None
     ) -> str:
-        """Builds standard AmneziaWG .conf file."""
+        """
+        Builds standard, universally compatible AmneziaWG 1.0 .conf file.
+        Strictly supported by AmneziaWG apps on Windows, Android, iOS, macOS,
+        Linux, and routers (Keenetic, OpenWrt, etc.).
+        """
+        dns_str = dns or settings.client_dns
+
+        lines = [
+            "[Interface]",
+            f"Address = {client_ip}/32",
+            f"DNS = {dns_str}",
+            f"PrivateKey = {client_privkey}"
+        ]
+
+        # Standard AWG 1.0 parameters strictly supported by all AmneziaWG clients.
+        # S3, S4, and I1-I5 are CPS / AWG 2.0 extensions that must NOT be present in standard .conf,
+        # as they trigger 'Unknown attribute in Interface' or 'Initpacketmagic' parse errors.
+        keys_order = ["Jc", "Jmin", "Jmax", "S1", "S2", "H1", "H2", "H3", "H4"]
+        defaults = {
+            "Jc": 4, "Jmin": 10, "Jmax": 50,
+            "S1": 137, "S2": 125,
+            "H1": 1310492814,
+            "H2": 2113096957,
+            "H3": 2140553016,
+            "H4": 2146569343
+        }
+
+        for k in keys_order:
+            val = awg_params.get(k)
+            if val is None or str(val).strip() == "":
+                val = defaults.get(k)
+            val_str = str(val).strip()
+
+            # For H1-H4, standard AmneziaWG clients only accept a single integer.
+            # If server params specify a range (e.g. '1310492814-1344318976'), take the first integer.
+            if k in ["H1", "H2", "H3", "H4"] and "-" in val_str:
+                val_str = val_str.split("-")[0].strip()
+
+            lines.append(f"{k} = {val_str}")
+
+        lines.append("")
+        lines.append("[Peer]")
+        lines.append(f"PublicKey = {server_pubkey}")
+        if preshared_key and preshared_key.strip() and preshared_key.strip() != "(none)":
+            lines.append(f"PresharedKey = {preshared_key.strip()}")
+        lines.append("AllowedIPs = 0.0.0.0/0, ::/0")
+        lines.append(f"Endpoint = {host}:{port}")
+        lines.append("PersistentKeepalive = 25\n")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def build_awg2_conf(
+        client_privkey: str,
+        client_ip: str,
+        server_pubkey: str,
+        host: str,
+        port: int,
+        awg_params: Dict[str, Any],
+        dns: Optional[str] = None,
+        preshared_key: Optional[str] = None
+    ) -> str:
+        """
+        Builds modern AmneziaWG 2.0 .conf file (with S3/S4, header ranges, and I1 if present).
+        Crucially omits empty fields (I2-I5) to prevent syntax errors on Android and Windows clients.
+        """
         dns_str = dns or settings.client_dns
 
         lines = [
@@ -84,31 +149,30 @@ class AWGService:
             "H1": "1310492814-1344318976",
             "H2": "2113096957-2126172807",
             "H3": "2140553016-2146460046",
-            "H4": "2146569343-2147347247",
-            "I1": "<b 0x084481800001000300000000077469636b65747306776964676574096b696e6f706f69736b0272750000010001c00c0005000100000039001806776964676574077469636b6574730679616e646578c025c0390005000100000039002b1765787465726e616c2d7469636b6574732d776964676574066166697368610679616e646578036e657400c05d000100010000001c000457fafe25>",
-            "I2": "", "I3": "", "I4": "", "I5": ""
+            "H4": "2146569343-2147347247"
         }
 
         for k in keys_order:
-            if k in awg_params and awg_params[k] is not None:
-                v = str(awg_params[k]).strip()
-                if v or k in ["I2", "I3", "I4", "I5"]:
-                    lines.append(f"{k} = {v}")
-                elif k in defaults:
-                    lines.append(f"{k} = {defaults[k]}")
-            elif k in defaults:
-                lines.append(f"{k} = {defaults[k]}")
+            val = awg_params.get(k)
+            if val is None or str(val).strip() == "":
+                val = defaults.get(k)
+            if val is not None:
+                val_str = str(val).strip()
+                # Do NOT emit empty lines like 'I2 = '
+                if val_str:
+                    lines.append(f"{k} = {val_str}")
 
         lines.append("")
         lines.append("[Peer]")
         lines.append(f"PublicKey = {server_pubkey}")
-        if preshared_key and preshared_key.strip():
+        if preshared_key and preshared_key.strip() and preshared_key.strip() != "(none)":
             lines.append(f"PresharedKey = {preshared_key.strip()}")
         lines.append("AllowedIPs = 0.0.0.0/0, ::/0")
         lines.append(f"Endpoint = {host}:{port}")
         lines.append("PersistentKeepalive = 25\n")
 
         return "\n".join(lines)
+
 
     @staticmethod
     def encode_vpn_uri(profile: dict) -> str:

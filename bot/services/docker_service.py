@@ -539,7 +539,13 @@ class DockerService:
         iface_name = settings.wg_interface or iface_info["interface"]
         internal_port = iface_info.get("listen_port", 51820)
         mapped_port = await self.get_mapped_port(internal_port)
-        port = settings.server_port or mapped_port or internal_port
+
+        from bot.database import models
+        custom_port = await models.get_setting("server_port")
+        if custom_port and custom_port.strip().isdigit():
+            port = int(custom_port.strip())
+        else:
+            port = settings.server_port or mapped_port or internal_port
 
         public_key = iface_info["public_key"]
         public_ip = await self.get_server_public_ip()
@@ -1215,6 +1221,155 @@ class DockerService:
                         logger.info(f"Updated IP in {path} to {clean_new_ip}")
         except Exception as e:
             logger.warning(f"Could not update IP in clientsTable: {e}")
+
+    async def update_awg_config_port(self, new_port: int, iface: str = "awg0") -> bool:
+        """Updates ListenPort = <new_port> in server config file (e.g. awg0.conf)."""
+        config_path = await self.find_config_file(iface)
+        if not config_path:
+            logger.warning(f"Config file for {iface} not found, cannot update ListenPort.")
+            return False
+
+        await self.backup_config_file(config_path)
+
+        code, out = await self.exec_cmd(f"grep -i -E '^[[:space:]]*ListenPort' {config_path} 2>/dev/null")
+        if code == 0 and out.strip():
+            sed_cmd = f"sed -i -E 's/^[[:space:]]*ListenPort[[:space:]]*=.*/ListenPort = {new_port}/I' {config_path}"
+            c, o = await self.exec_cmd(sed_cmd)
+            logger.info(f"Updated existing ListenPort to {new_port} in {config_path}")
+            return c == 0
+        else:
+            sed_cmd = f"sed -i '/^\\[Interface\\]/a ListenPort = {new_port}' {config_path}"
+            c, o = await self.exec_cmd(sed_cmd)
+            logger.info(f"Inserted ListenPort = {new_port} under [Interface] in {config_path}")
+            return c == 0
+
+    async def update_clients_table_port(self, new_port: int) -> int:
+        """Updates Endpoint port in all client records within Amnezia's clientsTable."""
+        try:
+            path = await self.get_amnezia_clients_table_path()
+            if not path:
+                return 0
+
+            code, content = await self.exec_cmd(f"cat {path}")
+            if code != 0 or not content.strip():
+                return 0
+
+            table = json.loads(content)
+            updated_count = 0
+
+            def _update_record(c: dict) -> bool:
+                rec_changed = False
+                for key in ["config"]:
+                    if key in c and isinstance(c[key], str) and "Endpoint" in c[key]:
+                        new_cfg, count = re.subn(r'(Endpoint\s*=\s*[^:\s]+):\d+', rf'\g<1>:{new_port}', c[key])
+                        if count > 0:
+                            c[key] = new_cfg
+                            rec_changed = True
+
+                ud = c.get("userData")
+                if isinstance(ud, dict):
+                    if "config" in ud and isinstance(ud["config"], str) and "Endpoint" in ud["config"]:
+                        new_cfg, count = re.subn(r'(Endpoint\s*=\s*[^:\s]+):\d+', rf'\g<1>:{new_port}', ud["config"])
+                        if count > 0:
+                            ud["config"] = new_cfg
+                            rec_changed = True
+                    if "port" in ud and str(ud["port"]) != str(new_port):
+                        ud["port"] = str(new_port)
+                        rec_changed = True
+
+                if "port" in c and str(c["port"]) != str(new_port):
+                    c["port"] = str(new_port)
+                    rec_changed = True
+
+                return rec_changed
+
+            items = []
+            if isinstance(table, list):
+                items = table
+            elif isinstance(table, dict):
+                if "clients" in table and isinstance(table["clients"], list):
+                    items = table["clients"]
+                else:
+                    items = list(table.values())
+
+            for item in items:
+                if isinstance(item, dict) and _update_record(item):
+                    updated_count += 1
+
+            if updated_count > 0:
+                await self.backup_config_file(path)
+                b64_str = base64.b64encode(json.dumps(table, indent=2, ensure_ascii=False).encode("utf-8")).decode("ascii")
+                await self.exec_cmd(f"echo '{b64_str}' | base64 -d > {path}")
+                logger.info(f"Updated port to {new_port} in {updated_count} records of {path}")
+
+            return updated_count
+        except Exception as e:
+            logger.warning(f"Could not update port in clientsTable: {e}")
+            return 0
+
+    async def set_server_port(self, new_port: int) -> Tuple[bool, str]:
+        """
+        Changes server listen port live in WireGuard/AmneziaWG runtime,
+        updates config file, updates clientsTable, and saves to database.
+        """
+        if not (1 <= new_port <= 65535):
+            return False, "Порт должен быть в диапазоне от 1 до 65535."
+
+        iface_info, _ = await self.get_wg_dump()
+        iface = iface_info["interface"] if iface_info else (settings.wg_interface or "awg0")
+
+        # 1. Update runtime interface listen port
+        bin_used = self._wg_bin or "awg"
+        cmd = f"{bin_used} set {iface} listen-port {new_port}"
+        code, out = await self.exec_cmd(cmd)
+        if code != 0:
+            alt_bin = "wg" if bin_used == "awg" else "awg"
+            code, out = await self.exec_cmd(f"{alt_bin} set {iface} listen-port {new_port}")
+            if code != 0:
+                logger.error(f"Failed to set listen port runtime: {out}")
+                return False, f"Ошибка применения порта в контейнере: {out}"
+
+        # 2. Update server config file
+        await self.update_awg_config_port(new_port, iface)
+
+        # 3. Update clientsTable if present
+        updated_clients = await self.update_clients_table_port(new_port)
+
+        # 4. Save to database server_settings
+        await models.set_setting("server_port", str(new_port))
+
+        # 5. Invalidate cached server info
+        self._cached_server_info = None
+
+        logger.info(f"Successfully changed server port to {new_port} (updated {updated_clients} clients in clientsTable)")
+        return True, f"Порт успешно изменён на {new_port}"
+
+    async def regenerate_all_configs(self, new_port: Optional[int] = None) -> Dict[str, Any]:
+        """
+        Regenerates all configurations to ensure they use the specified or active server port.
+        Updates clientsTable, database settings, and clears cached server info.
+        """
+        if new_port is not None:
+            success, msg = await self.set_server_port(new_port)
+            if not success:
+                return {"ok": False, "message": msg, "count": 0}
+            active_port = new_port
+        else:
+            server_info = await self.get_server_info()
+            active_port = server_info["port"]
+            iface = server_info.get("interface", "awg0")
+            await self.update_awg_config_port(active_port, iface)
+            await self.update_clients_table_port(active_port)
+            await models.set_setting("server_port", str(active_port))
+            self._cached_server_info = None
+
+        peers = await models.get_all_peers()
+        return {
+            "ok": True,
+            "port": active_port,
+            "count": len(peers),
+            "message": f"Конфигурации ({len(peers)} клиентов) обновлены с портом {active_port}."
+        }
 
 
 docker_service = DockerService()

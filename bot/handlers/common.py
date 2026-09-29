@@ -79,6 +79,9 @@ def get_native_delivery_keyboard(peer_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📄 Файл .conf", callback_data=f"deliv:awg_file:{peer_id}")
         ],
         [
+            InlineKeyboardButton(text="🚀 Файл AWG 2.0 (.conf)", callback_data=f"deliv:awg2_file:{peer_id}")
+        ],
+        [
             InlineKeyboardButton(text="📋 Скопировать текстом", callback_data=f"deliv:awg_text:{peer_id}")
         ],
         [

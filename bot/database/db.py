@@ -46,6 +46,12 @@ async def init_db():
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS server_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
         CREATE INDEX IF NOT EXISTS idx_traffic_logs_peer_ts ON traffic_logs(peer_id, timestamp);
         CREATE INDEX IF NOT EXISTS idx_traffic_logs_ts ON traffic_logs(timestamp);
     """)

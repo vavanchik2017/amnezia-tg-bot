@@ -366,3 +366,27 @@ async def get_clients_traffic_ranking(period: str = "day") -> List[Dict[str, Any
     rows = await cursor.fetchall()
     return [dict(r) for r in rows]
 
+
+async def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
+    """Retrieves a persistent setting from server_settings table."""
+    db = await get_db()
+    cursor = await db.execute("SELECT value FROM server_settings WHERE key = ?", (key,))
+    row = await cursor.fetchone()
+    return row["value"] if row else default
+
+
+async def set_setting(key: str, value: str):
+    """Saves or updates a persistent setting in server_settings table."""
+    db = await get_db()
+    await db.execute(
+        """
+        INSERT INTO server_settings (key, value, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (key, str(value))
+    )
+    await db.commit()
+

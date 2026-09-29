@@ -226,6 +226,16 @@ async def get_peer_materials_data(peer_id: int):
         preshared_key=preshared_key
     )
 
+    awg2_conf = awg_service.build_awg2_conf(
+        client_privkey=client_priv,
+        client_ip=client_ip,
+        server_pubkey=server_pub,
+        host=host,
+        port=port,
+        awg_params=awg_params,
+        preshared_key=preshared_key
+    )
+
     vpn_json, vpn_uri = awg_service.build_amnezia_vpn_json(
         client_name=name,
         client_privkey=client_priv,
@@ -246,6 +256,7 @@ async def get_peer_materials_data(peer_id: int):
         "name": name,
         "safe_filename": safe_filename,
         "native_conf": native_conf,
+        "awg2_conf": awg2_conf,
         "vpn_json": vpn_json,
         "vpn_uri": vpn_uri,
         "host": host
@@ -306,6 +317,36 @@ async def cb_deliv_awg_file(callback: CallbackQuery):
         caption=(
             f"📄 <b>Файл Native AmneziaWG (.conf)</b> для <code>{html.escape(data['name'])}</code>\n\n"
             "Импортируйте этот файл в приложение <b>AmneziaWG</b>."
+        ),
+        reply_markup=back_kb,
+        parse_mode="HTML"
+    )
+
+
+@peers_router.callback_query(IsAdminFilter(), F.data.startswith("deliv:awg2_file:"))
+async def cb_deliv_awg2_file(callback: CallbackQuery):
+    peer_id = int(callback.data.split(":")[2])
+    data, err = await get_peer_materials_data(peer_id)
+    if err:
+        await callback.message.answer(err, parse_mode="HTML")
+        await callback.answer()
+        return
+    await callback.answer("Отправляем файл AWG 2.0...")
+
+    conf_file = BufferedInputFile(data["awg2_conf"].encode("utf-8"), filename=f"{data['safe_filename']}_awg2.conf")
+    back_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Другой способ", callback_data=f"fmt:awg:{peer_id}")],
+            [InlineKeyboardButton(text="👤 К карточке", callback_data=f"view_peer:{peer_id}")]
+        ]
+    )
+
+    await callback.message.answer_document(
+        document=conf_file,
+        caption=(
+            f"🚀 <b>Файл AmneziaWG 2.0 (.conf)</b> для <code>{html.escape(data['name'])}</code>\n\n"
+            "Содержит параметры обфускации AWG 2.0 (CPS, диапазоны заголовков).\n"
+            "<i>Примечание: если ваш клиент выдает ошибку неизвестного атрибута, используйте стандартный <b>📄 Файл .conf</b>.</i>"
         ),
         reply_markup=back_kb,
         parse_mode="HTML"

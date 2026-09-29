@@ -69,7 +69,8 @@ class AWGService:
             "[Interface]",
             f"Address = {client_ip}/32",
             f"PrivateKey = {client_privkey}",
-            f"DNS = {dns_str}"
+            f"DNS = {dns_str}",
+            "MTU = 1376"
         ]
 
         # Standard AWG parameters strictly supported by standalone AmneziaWG apps.
@@ -82,13 +83,7 @@ class AWGService:
 
         for k in keys_order:
             if k in awg_params and awg_params[k] is not None and str(awg_params[k]).strip() != "":
-                val = str(awg_params[k]).strip()
-                # For H1-H4, standalone AmneziaWG .conf parsers ONLY accept a single uint32 integer.
-                # If server params contain a range (e.g. '1310492814-1344318976'), taking the first number
-                # ensures strict compatibility with AmneziaWG 1.0 mobile/desktop apps and routers.
-                if k in ["H1", "H2", "H3", "H4"] and "-" in val:
-                    val = val.split("-")[0].strip()
-                lines.append(f"{k} = {val}")
+                lines.append(f"{k} = {awg_params[k]}")
             elif k in defaults:
                 lines.append(f"{k} = {defaults[k]}")
 

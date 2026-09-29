@@ -148,39 +148,40 @@ class DockerService:
             return int(val_str) if val_str.isdigit() else val_str
 
         awg_dump_params = {}
-        start_awg_idx = 4 if (len(parts[0]) == 44 and parts[0].endswith("=")) else 5
-        # If AWG parameters are present in dump: jc, jmin, jmax, s1, s2, s3, s4, h1, h2, h3, h4
-        if len(parts) >= start_awg_idx + 11:
+        # In AmneziaWG dump, the interface line ends with the obfuscation parameters.
+        # AWG 2.0 (11 parameters): Jc, Jmin, Jmax, S1, S2, S3, S4, H1, H2, H3, H4
+        # AWG 1.0 (9 parameters): Jc, Jmin, Jmax, S1, S2, H1, H2, H3, H4
+        if len(parts) >= 15:
             try:
                 awg_dump_params = {
-                    "Jc": _parse_p(parts[start_awg_idx]),
-                    "Jmin": _parse_p(parts[start_awg_idx + 1]),
-                    "Jmax": _parse_p(parts[start_awg_idx + 2]),
-                    "S1": _parse_p(parts[start_awg_idx + 3]),
-                    "S2": _parse_p(parts[start_awg_idx + 4]),
-                    "S3": _parse_p(parts[start_awg_idx + 5]),
-                    "S4": _parse_p(parts[start_awg_idx + 6]),
-                    "H1": _parse_p(parts[start_awg_idx + 7]),
-                    "H2": _parse_p(parts[start_awg_idx + 8]),
-                    "H3": _parse_p(parts[start_awg_idx + 9]),
-                    "H4": _parse_p(parts[start_awg_idx + 10])
+                    "Jc": _parse_p(parts[-11]),
+                    "Jmin": _parse_p(parts[-10]),
+                    "Jmax": _parse_p(parts[-9]),
+                    "S1": _parse_p(parts[-8]),
+                    "S2": _parse_p(parts[-7]),
+                    "S3": _parse_p(parts[-6]),
+                    "S4": _parse_p(parts[-5]),
+                    "H1": _parse_p(parts[-4]),
+                    "H2": _parse_p(parts[-3]),
+                    "H3": _parse_p(parts[-2]),
+                    "H4": _parse_p(parts[-1])
                 }
                 logger.info(f"Loaded live AWG params from dump line: {awg_dump_params}")
             except Exception as e:
                 logger.warning(f"Could not parse AWG params from dump line: {e}")
-        elif len(parts) >= start_awg_idx + 9:
-            # Fallback for AWG 1.0 (without s3/s4): jc, jmin, jmax, s1, s2, h1, h2, h3, h4
+        elif len(parts) >= 13:
+            # Fallback for AWG 1.0 (without s3/s4): 9 params at the end
             try:
                 awg_dump_params = {
-                    "Jc": _parse_p(parts[start_awg_idx]),
-                    "Jmin": _parse_p(parts[start_awg_idx + 1]),
-                    "Jmax": _parse_p(parts[start_awg_idx + 2]),
-                    "S1": _parse_p(parts[start_awg_idx + 3]),
-                    "S2": _parse_p(parts[start_awg_idx + 4]),
-                    "H1": _parse_p(parts[start_awg_idx + 5]),
-                    "H2": _parse_p(parts[start_awg_idx + 6]),
-                    "H3": _parse_p(parts[start_awg_idx + 7]),
-                    "H4": _parse_p(parts[start_awg_idx + 8])
+                    "Jc": _parse_p(parts[-9]),
+                    "Jmin": _parse_p(parts[-8]),
+                    "Jmax": _parse_p(parts[-7]),
+                    "S1": _parse_p(parts[-6]),
+                    "S2": _parse_p(parts[-5]),
+                    "H1": _parse_p(parts[-4]),
+                    "H2": _parse_p(parts[-3]),
+                    "H3": _parse_p(parts[-2]),
+                    "H4": _parse_p(parts[-1])
                 }
                 logger.info(f"Loaded live AWG 1.0 params from dump line: {awg_dump_params}")
             except Exception as e:
@@ -282,61 +283,87 @@ class DockerService:
         return None
 
     async def get_awg_params(self, iface: str) -> Dict[str, Any]:
-        """Extracts standard AmneziaWG obfuscation parameters from server config file."""
-        config_path = await self.find_config_file(iface)
+        """Extracts standard AmneziaWG obfuscation parameters from server config file or clientsTable."""
         params = {
-            "Jc": 3,
-            "Jmin": 40,
-            "Jmax": 70,
-            "S1": 15,
-            "S2": 57,
-            "H1": 1,
-            "H2": 2,
-            "H3": 3,
-            "H4": 4
+            "Jc": 4,
+            "Jmin": 10,
+            "Jmax": 50,
+            "S1": 137,
+            "S2": 125,
+            "S3": 62,
+            "S4": 10,
+            "H1": "1310492814-1344318976",
+            "H2": "2113096957-2126172807",
+            "H3": "2140553016-2146460046",
+            "H4": "2146569343-2147347247",
+            "I1": "<b 0x084481800001000300000000077469636b65747306776964676574096b696e6f706f69736b0272750000010001c00c0005000100000039001806776964676574077469636b6574730679616e646578c025c0390005000100000039002b1765787465726e616c2d7469636b6574732d776964676574066166697368610679616e646578036e657400c05d000100010000001c000457fafe25>",
+            "I2": "", "I3": "", "I4": "", "I5": ""
         }
 
-        if not config_path:
-            logger.warning(f"Config file for interface {iface} not found. Using default AWG params.")
-            return params
+        # 1. Try extracting ground truth from an existing client in clientsTable
+        try:
+            tbl_path = await self.get_amnezia_clients_table_path()
+            if tbl_path:
+                code, tbl_content = await self.exec_cmd(f"cat {tbl_path}")
+                if code == 0 and tbl_content.strip():
+                    tbl = json.loads(tbl_content)
+                    raw_items = tbl if isinstance(tbl, list) else tbl.get("clientsTable") or tbl.get("clients") or []
+                    for item in raw_items:
+                        cfg = item.get("config") or (item.get("userData", {}).get("config") if isinstance(item.get("userData"), dict) else None)
+                        if cfg and ("H1" in cfg or "Jc" in cfg):
+                            target_map = {
+                                "JC": "Jc", "JMIN": "Jmin", "JMAX": "Jmax",
+                                "S1": "S1", "S2": "S2", "S3": "S3", "S4": "S4",
+                                "H1": "H1", "H2": "H2", "H3": "H3", "H4": "H4",
+                                "I1": "I1", "I2": "I2", "I3": "I3", "I4": "I4", "I5": "I5"
+                            }
+                            for cline in cfg.splitlines():
+                                cline = cline.strip()
+                                if "=" in cline and not cline.startswith("#") and not cline.startswith(";"):
+                                    ck, cv = [x.strip() for x in cline.split("=", 1)]
+                                    ck_upper = ck.upper()
+                                    target_key = target_map.get(ck_upper)
+                                    if target_key:
+                                        params[target_key] = int(cv) if cv.isdigit() else cv
+                            logger.info(f"Loaded live AWG params from Amnezia clientsTable: Jc={params.get('Jc')}, H1={params.get('H1')}")
+                            return params
+        except Exception as e:
+            logger.warning(f"Could not load AWG params from clientsTable: {e}")
 
-        code, content = await self.exec_cmd(f"cat {config_path}")
-        if code != 0 or not content:
-            return params
+        # 2. Try reading from server config file (awg0.conf)
+        config_path = await self.find_config_file(iface)
+        if config_path:
+            code, content = await self.exec_cmd(f"cat {config_path}")
+            if code == 0 and content:
+                standard_keys = {
+                    "JC": "Jc", "JMIN": "Jmin", "JMAX": "Jmax",
+                    "S1": "S1", "S2": "S2", "S3": "S3", "S4": "S4",
+                    "H1": "H1", "H2": "H2", "H3": "H3", "H4": "H4",
+                    "I1": "I1", "I2": "I2", "I3": "I3", "I4": "I4", "I5": "I5"
+                }
 
-        standard_keys = {
-            "JC": "Jc", "JMIN": "Jmin", "JMAX": "Jmax",
-            "S1": "S1", "S2": "S2", "S3": "S3", "S4": "S4",
-            "H1": "H1", "H2": "H2", "H3": "H3", "H4": "H4"
-        }
-
-        in_interface = False
-        for line in content.splitlines():
-            line = line.strip()
-            if line.startswith("[Interface]"):
-                in_interface = True
-                continue
-            if line.startswith("[") and not line.startswith("[Interface]"):
                 in_interface = False
-                break
-            if not in_interface:
-                continue
+                for line in content.splitlines():
+                    line = line.strip()
+                    if line.startswith("[Interface]"):
+                        in_interface = True
+                        continue
+                    if line.startswith("[") and not line.startswith("[Interface]"):
+                        in_interface = False
+                        break
+                    if not in_interface:
+                        continue
+                    if line.startswith("#") or line.startswith(";"):
+                        continue
+                    if "=" in line:
+                        k, v = [p.strip() for p in line.split("=", 1)]
+                        v = v.split("#", 1)[0].split(";", 1)[0].strip()
+                        real_key = standard_keys.get(k.upper())
+                        if real_key:
+                            params[real_key] = int(v) if v.isdigit() else v
 
-            # Strictly skip commented lines - do not parse inactive parameters like '# I1 = ...'
-            if line.startswith("#") or line.startswith(";"):
-                continue
+                logger.info(f"Loaded AWG params from {config_path}: {params}")
 
-            if "=" in line:
-                k, v = [p.strip() for p in line.split("=", 1)]
-                v = v.split("#", 1)[0].split(";", 1)[0].strip()
-                real_key = standard_keys.get(k.upper())
-                if real_key and v:
-                    try:
-                        params[real_key] = int(v)
-                    except ValueError:
-                        params[real_key] = v
-
-        logger.info(f"Loaded AWG params from {config_path}: {params}")
         return params
 
     async def get_preshared_key(self) -> Optional[str]:

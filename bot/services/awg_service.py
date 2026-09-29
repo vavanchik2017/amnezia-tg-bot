@@ -68,22 +68,34 @@ class AWGService:
         lines = [
             "[Interface]",
             f"Address = {client_ip}/32",
-            f"PrivateKey = {client_privkey}",
             f"DNS = {dns_str}",
-            "MTU = 1376"
+            f"PrivateKey = {client_privkey}"
         ]
 
-        # Standard AWG parameters strictly supported by standalone AmneziaWG apps.
-        # S3 and S4 must NOT be included in .conf as they trigger 'Unknown attribute in Interface' in clients.
-        keys_order = ["Jc", "Jmin", "Jmax", "S1", "S2", "H1", "H2", "H3", "H4"]
+        keys_order = [
+            "Jc", "Jmin", "Jmax",
+            "S1", "S2", "S3", "S4",
+            "H1", "H2", "H3", "H4",
+            "I1", "I2", "I3", "I4", "I5"
+        ]
         defaults = {
-            "Jc": 3, "Jmin": 40, "Jmax": 70, "S1": 15, "S2": 57,
-            "H1": 1, "H2": 2, "H3": 3, "H4": 4
+            "Jc": 4, "Jmin": 10, "Jmax": 50,
+            "S1": 137, "S2": 125, "S3": 62, "S4": 10,
+            "H1": "1310492814-1344318976",
+            "H2": "2113096957-2126172807",
+            "H3": "2140553016-2146460046",
+            "H4": "2146569343-2147347247",
+            "I1": "<b 0x084481800001000300000000077469636b65747306776964676574096b696e6f706f69736b0272750000010001c00c0005000100000039001806776964676574077469636b6574730679616e646578c025c0390005000100000039002b1765787465726e616c2d7469636b6574732d776964676574066166697368610679616e646578036e657400c05d000100010000001c000457fafe25>",
+            "I2": "", "I3": "", "I4": "", "I5": ""
         }
 
         for k in keys_order:
-            if k in awg_params and awg_params[k] is not None and str(awg_params[k]).strip() != "":
-                lines.append(f"{k} = {awg_params[k]}")
+            if k in awg_params and awg_params[k] is not None:
+                v = str(awg_params[k]).strip()
+                if v or k in ["I2", "I3", "I4", "I5"]:
+                    lines.append(f"{k} = {v}")
+                elif k in defaults:
+                    lines.append(f"{k} = {defaults[k]}")
             elif k in defaults:
                 lines.append(f"{k} = {defaults[k]}")
 
@@ -92,8 +104,8 @@ class AWGService:
         lines.append(f"PublicKey = {server_pubkey}")
         if preshared_key and preshared_key.strip():
             lines.append(f"PresharedKey = {preshared_key.strip()}")
-        lines.append(f"Endpoint = {host}:{port}")
         lines.append("AllowedIPs = 0.0.0.0/0, ::/0")
+        lines.append(f"Endpoint = {host}:{port}")
         lines.append("PersistentKeepalive = 25\n")
 
         return "\n".join(lines)
@@ -147,11 +159,28 @@ class AWGService:
             preshared_key=preshared_key
         )
 
-        keys_order = ["Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4"]
+        keys_order = [
+            "Jc", "Jmin", "Jmax",
+            "S1", "S2", "S3", "S4",
+            "H1", "H2", "H3", "H4",
+            "I1", "I2", "I3", "I4", "I5"
+        ]
+        defaults = {
+            "Jc": "4", "Jmin": "10", "Jmax": "50",
+            "S1": "137", "S2": "125", "S3": "62", "S4": "10",
+            "H1": "1310492814-1344318976",
+            "H2": "2113096957-2126172807",
+            "H3": "2140553016-2146460046",
+            "H4": "2146569343-2147347247",
+            "I1": "<b 0x084481800001000300000000077469636b65747306776964676574096b696e6f706f69736b0272750000010001c00c0005000100000039001806776964676574077469636b6574730679616e646578c025c0390005000100000039002b1765787465726e616c2d7469636b6574732d776964676574066166697368610679616e646578036e657400c05d000100010000001c000457fafe25>",
+            "I2": "", "I3": "", "I4": "", "I5": ""
+        }
         json_awg_params = {}
         for k in keys_order:
             if k in awg_params and awg_params[k] is not None and str(awg_params[k]).strip() != "":
-                json_awg_params[k] = str(awg_params[k])
+                json_awg_params[k] = str(awg_params[k]).strip()
+            elif k in defaults and defaults[k]:
+                json_awg_params[k] = defaults[k]
 
         awg_last_config = {
             **json_awg_params,

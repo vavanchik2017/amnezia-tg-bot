@@ -82,7 +82,13 @@ class AWGService:
 
         for k in keys_order:
             if k in awg_params and awg_params[k] is not None and str(awg_params[k]).strip() != "":
-                lines.append(f"{k} = {awg_params[k]}")
+                val = str(awg_params[k]).strip()
+                # For H1-H4, standalone AmneziaWG .conf parsers ONLY accept a single uint32 integer.
+                # If server params contain a range (e.g. '1310492814-1344318976'), taking the first number
+                # ensures strict compatibility with AmneziaWG 1.0 mobile/desktop apps and routers.
+                if k in ["H1", "H2", "H3", "H4"] and "-" in val:
+                    val = val.split("-")[0].strip()
+                lines.append(f"{k} = {val}")
             elif k in defaults:
                 lines.append(f"{k} = {defaults[k]}")
 
@@ -182,19 +188,14 @@ class AWGService:
             "transport_proto": "udp"
         }
 
-        # For amnezia-awg2 container, specify 'awg2' block only.
-        # If 'awg' is present, the Amnezia VPN app labels it as 'Amnezia Legacy (версия 2)'.
-        # Setting 'awg2' causes Amnezia VPN to correctly recognize it as modern AmneziaWG (without Legacy).
-        if target_container == "amnezia-awg2":
-            container_obj = {
-                "container": target_container,
-                "awg2": awg_block
-            }
-        else:
-            container_obj = {
-                "container": target_container,
-                "awg": awg_block
-            }
+        # Ensure both 'awg' and 'awg2' keys are present in container_obj.
+        # The official Amnezia VPN client resolves the protocol config under 'awg' (ProtocolUtils::key_proto_config_data).
+        # Omitting 'awg' causes client ErrorCode 101 (Internal error / protocol missing).
+        container_obj = {
+            "container": target_container,
+            "awg": awg_block,
+            "awg2": awg_block
+        }
 
         profile = {
             "containers": [container_obj],

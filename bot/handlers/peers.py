@@ -19,6 +19,7 @@ from bot.handlers.common import (
     get_format_choice_keyboard,
     get_native_delivery_keyboard,
     get_vpn_delivery_keyboard,
+    get_delivery_result_keyboard,
     get_download_format_keyboard,
     safe_edit_message
 )
@@ -276,12 +277,7 @@ async def cb_deliv_awg_qr(callback: CallbackQuery):
     qr_bio = awg_service.generate_qr_code(data["native_conf"])
     qr_file = BufferedInputFile(qr_bio.read(), filename=f"{data['safe_filename']}_awg.png")
 
-    back_kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Другой способ", callback_data=f"fmt:awg:{peer_id}")],
-            [InlineKeyboardButton(text="👤 К карточке", callback_data=f"view_peer:{peer_id}")]
-        ]
-    )
+    back_kb = get_delivery_result_keyboard(peer_id, "awg")
 
     await callback.message.answer_photo(
         photo=qr_file,
@@ -305,12 +301,7 @@ async def cb_deliv_awg_file(callback: CallbackQuery):
     await callback.answer("Отправляем файл...")
 
     conf_file = BufferedInputFile(data["native_conf"].encode("utf-8"), filename=f"{data['safe_filename']}.conf")
-    back_kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Другой способ", callback_data=f"fmt:awg:{peer_id}")],
-            [InlineKeyboardButton(text="👤 К карточке", callback_data=f"view_peer:{peer_id}")]
-        ]
-    )
+    back_kb = get_delivery_result_keyboard(peer_id, "awg")
 
     await callback.message.answer_document(
         document=conf_file,
@@ -334,12 +325,7 @@ async def cb_deliv_awg2_file(callback: CallbackQuery):
     await callback.answer("Отправляем файл AWG 2.0...")
 
     conf_file = BufferedInputFile(data["awg2_conf"].encode("utf-8"), filename=f"{data['safe_filename']}_awg2.conf")
-    back_kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Другой способ", callback_data=f"fmt:awg:{peer_id}")],
-            [InlineKeyboardButton(text="👤 К карточке", callback_data=f"view_peer:{peer_id}")]
-        ]
-    )
+    back_kb = get_delivery_result_keyboard(peer_id, "awg")
 
     await callback.message.answer_document(
         document=conf_file,
@@ -363,12 +349,7 @@ async def cb_deliv_awg_text(callback: CallbackQuery):
         return
     await callback.answer()
 
-    back_kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Другой способ", callback_data=f"fmt:awg:{peer_id}")],
-            [InlineKeyboardButton(text="👤 К карточке", callback_data=f"view_peer:{peer_id}")]
-        ]
-    )
+    back_kb = get_delivery_result_keyboard(peer_id, "awg")
 
     await callback.message.answer(
         f"📋 <b>Конфигурация Native AmneziaWG для «{html.escape(data['name'])}»:</b>\n\n"
@@ -392,12 +373,7 @@ async def cb_deliv_vpn_qr(callback: CallbackQuery):
     qr_bio = awg_service.generate_qr_code(data["vpn_uri"])
     qr_file = BufferedInputFile(qr_bio.read(), filename=f"{data['safe_filename']}_vpn.png")
 
-    back_kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Другой способ", callback_data=f"fmt:vpn:{peer_id}")],
-            [InlineKeyboardButton(text="👤 К карточке", callback_data=f"view_peer:{peer_id}")]
-        ]
-    )
+    back_kb = get_delivery_result_keyboard(peer_id, "vpn")
 
     await callback.message.answer_photo(
         photo=qr_file,
@@ -421,12 +397,7 @@ async def cb_deliv_vpn_file(callback: CallbackQuery):
     await callback.answer("Отправляем файл...")
 
     vpn_file = BufferedInputFile(data["vpn_json"].encode("utf-8"), filename=f"{data['safe_filename']}.vpn")
-    back_kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Другой способ", callback_data=f"fmt:vpn:{peer_id}")],
-            [InlineKeyboardButton(text="👤 К карточке", callback_data=f"view_peer:{peer_id}")]
-        ]
-    )
+    back_kb = get_delivery_result_keyboard(peer_id, "vpn")
 
     await callback.message.answer_document(
         document=vpn_file,
@@ -449,12 +420,7 @@ async def cb_deliv_vpn_text(callback: CallbackQuery):
         return
     await callback.answer()
 
-    back_kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Другой способ", callback_data=f"fmt:vpn:{peer_id}")],
-            [InlineKeyboardButton(text="👤 К карточке", callback_data=f"view_peer:{peer_id}")]
-        ]
-    )
+    back_kb = get_delivery_result_keyboard(peer_id, "vpn")
 
     await callback.message.answer(
         f"🔗 <b>Ссылка Amnezia VPN для «{html.escape(data['name'])}»:</b>\n\n"
@@ -500,20 +466,14 @@ async def cb_get_all(callback: CallbackQuery):
     await callback.message.answer(
         f"🔗 <b>Ссылка Amnezia VPN для «{html.escape(data['name'])}»:</b>\n\n"
         f"<code>{html.escape(data['vpn_uri'])}</code>",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="👤 К карточке", callback_data=f"view_peer:{peer_id}")]
-            ]
-        ),
+        reply_markup=get_delivery_result_keyboard(peer_id, "vpn"),
         parse_mode="HTML"
     )
 
 
 # --- Список и просмотр пиров ---
 
-@peers_router.callback_query(IsAdminFilter(), F.data.startswith("list_peers:"))
-async def cb_list_peers(callback: CallbackQuery):
-    page = int(callback.data.split(":")[1])
+async def render_peers_list(callback: CallbackQuery, page: int = 0):
     # Автоматически синхронизируем всех существующих клиентов с сервера
     await docker_service.sync_peers_from_wireguard()
     peers = await models.get_all_peers()
@@ -523,11 +483,10 @@ async def cb_list_peers(callback: CallbackQuery):
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="➕ Выпустить конфиг", callback_data="create_peer")],
-                [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")]
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
             ]
         )
         await safe_edit_message(callback, text, reply_markup=kb, parse_mode="HTML")
-        await callback.answer()
         return
 
     page_size = 6
@@ -543,8 +502,8 @@ async def cb_list_peers(callback: CallbackQuery):
         # Статус
         if not is_active:
             status_icon = "⏸"
-        elif handshake > 0 and (int(handshake) > 0 and (import_time := handshake)):
-            # Handshake активен?
+        elif handshake > 0 and int(handshake) > 0:
+            # Handshake активен
             status_icon = "🟢"
         else:
             status_icon = "🟡"
@@ -559,12 +518,13 @@ async def cb_list_peers(callback: CallbackQuery):
     nav_row.append(InlineKeyboardButton(text=f"Стр. {page + 1}/{total_pages}", callback_data="noop"))
     if page < total_pages - 1:
         nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"list_peers:{page + 1}"))
-    keyboard_rows.append(nav_row)
+    if nav_row:
+        keyboard_rows.append(nav_row)
 
     # Нижние кнопки
     keyboard_rows.append([
         InlineKeyboardButton(text="➕ Выпустить конфиг", callback_data="create_peer"),
-        InlineKeyboardButton(text="⬅️ В меню", callback_data="main_menu")
+        InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")
     ])
 
     text = (
@@ -575,6 +535,12 @@ async def cb_list_peers(callback: CallbackQuery):
         f"<i>Нажмите на конфиг для управления:</i>"
     )
     await safe_edit_message(callback, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows), parse_mode="HTML")
+
+
+@peers_router.callback_query(IsAdminFilter(), F.data.startswith("list_peers:"))
+async def cb_list_peers(callback: CallbackQuery):
+    page = int(callback.data.split(":")[1])
+    await render_peers_list(callback, page=page)
     await callback.answer()
 
 
@@ -740,13 +706,13 @@ async def cb_delete_exec(callback: CallbackQuery):
     try:
         await docker_service.remove_peer_runtime(peer["public_key"])
         await models.delete_peer(peer_id)
-        await callback.answer("🗑 Конфиг успешно удален!", show_alert=True)
+        await callback.answer("🗑 Конфиг успешно удален!")
     except Exception as e:
         await callback.answer(f"Ошибка при удалении: {e}", show_alert=True)
         return
 
-    # Возврат к списку
-    await cb_list_peers(callback)
+    # Возврат к списку конфигов
+    await render_peers_list(callback, page=0)
 
 
 # --- Переименование конфига ---
@@ -813,7 +779,10 @@ async def process_rename_peer(message: Message, state: FSMContext):
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="👤 К карточке конфига", callback_data=f"view_peer:{peer_id}")],
-            [InlineKeyboardButton(text="👥 Список всех конфигов", callback_data="list_peers:0")]
+            [
+                InlineKeyboardButton(text="👥 Список всех конфигов", callback_data="list_peers:0"),
+                InlineKeyboardButton(text="🏠 На главную", callback_data="main_menu")
+            ]
         ]
     )
     await message.answer(

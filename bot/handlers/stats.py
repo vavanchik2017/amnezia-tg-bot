@@ -74,8 +74,11 @@ async def cb_peer_stats(callback: CallbackQuery):
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"peer_stats:{peer_id}")],
-            [InlineKeyboardButton(text="👤 К карточке конфига", callback_data=f"view_peer:{peer_id}")],
-            [InlineKeyboardButton(text="👥 Список всех конфигов", callback_data="list_peers:0")]
+            [
+                InlineKeyboardButton(text="👤 К карточке", callback_data=f"view_peer:{peer_id}"),
+                InlineKeyboardButton(text="👥 К списку", callback_data="list_peers:0")
+            ],
+            [InlineKeyboardButton(text="🏠 На главную", callback_data="main_menu")]
         ]
     )
     await safe_edit_message(callback, text, reply_markup=kb, parse_mode="HTML")

@@ -49,7 +49,8 @@ def get_peer_keyboard(peer_id: int, is_active: bool, has_subnet_mismatch: bool =
             InlineKeyboardButton(text="🗑 Отозвать", callback_data=f"delete_confirm:{peer_id}")
         ],
         [
-            InlineKeyboardButton(text="⬅️ Назад к списку", callback_data="list_peers:0")
+            InlineKeyboardButton(text="⬅️ Назад к списку", callback_data="list_peers:0"),
+            InlineKeyboardButton(text="🏠 На главную", callback_data="main_menu")
         ]
     ])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -65,7 +66,8 @@ def get_format_choice_keyboard(peer_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🛡 Amnezia VPN (.vpn)", callback_data=f"fmt:vpn:{peer_id}")
         ],
         [
-            InlineKeyboardButton(text="👤 К карточке конфига", callback_data=f"view_peer:{peer_id}")
+            InlineKeyboardButton(text="👤 К карточке конфига", callback_data=f"view_peer:{peer_id}"),
+            InlineKeyboardButton(text="🏠 На главную", callback_data="main_menu")
         ]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -85,7 +87,8 @@ def get_native_delivery_keyboard(peer_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📋 Скопировать текстом", callback_data=f"deliv:awg_text:{peer_id}")
         ],
         [
-            InlineKeyboardButton(text="⬅️ Выбрать другой формат", callback_data=f"download_choice:{peer_id}")
+            InlineKeyboardButton(text="⬅️ Выбрать другой формат", callback_data=f"download_choice:{peer_id}"),
+            InlineKeyboardButton(text="🏠 На главную", callback_data="main_menu")
         ]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -102,7 +105,23 @@ def get_vpn_delivery_keyboard(peer_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🔗 Ссылка vpn:// (скопировать)", callback_data=f"deliv:vpn_text:{peer_id}")
         ],
         [
-            InlineKeyboardButton(text="⬅️ Выбрать другой формат", callback_data=f"download_choice:{peer_id}")
+            InlineKeyboardButton(text="⬅️ Выбрать другой формат", callback_data=f"download_choice:{peer_id}"),
+            InlineKeyboardButton(text="🏠 На главную", callback_data="main_menu")
+        ]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_delivery_result_keyboard(peer_id: int, fmt_type: str = "awg") -> InlineKeyboardMarkup:
+    """Keyboard attached directly under issued config documents, QR photos, or text."""
+    buttons = [
+        [
+            InlineKeyboardButton(text="⬅️ Другой способ", callback_data=f"fmt:{fmt_type}:{peer_id}"),
+            InlineKeyboardButton(text="👤 К карточке", callback_data=f"view_peer:{peer_id}")
+        ],
+        [
+            InlineKeyboardButton(text="👥 Список конфигов", callback_data="list_peers:0"),
+            InlineKeyboardButton(text="🏠 На главную", callback_data="main_menu")
         ]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
